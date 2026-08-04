@@ -1,0 +1,170 @@
+<!--
+  Domain TEMPLATE for the unattended-install round — rendered by
+  guest/build.py. Placeholders are double-at delimited; the renderer refuses
+  to emit a file with any of them left.
+
+  THIS IS NOT A COPY OF win11.xml, AND K10 IS WHY. The one source of truth for
+  a live domain is libvirt's own store; what lives in the repo is the thing that
+  GENERATES a domain, not a hand-edited snapshot of one. K10's two writing rules
+  survive here by omission:
+
+    * no <loader>/<nvram> paths — <os firmware='efi'> plus the feature request
+      lets libvirt choose. An embedded firmware path is what broke the old XML.
+    * no <address> elements and no pcie-root-port controllers — libvirt
+      generates them. Hand-written addresses are a conflict waiting for the day
+      a <hostdev> gets added.
+
+  WHAT IS DELIBERATELY MISSING, AND WHY. This domain does not passthrough the
+  dGPU and carries no kvmfr/ivshmem block. The question this round answers is
+  "does autounattend.xml produce a booted guest with a reachable agent" — the
+  card has nothing to do with it. Leaving it out means the round costs no
+  handover, cannot disturb win11's card, and can run while the desktop is live
+  instead of from a plain VT. The <hostdev> pair and the Looking Glass plumbing
+  are added once the install itself is boring.
+
+  The watchdog is out for the same reason: one fewer way for a 25-minute
+  unattended run to end in a reset nobody watched.
+
+  BOTH DOMAINS MUST NEVER RUN AT ONCE once the hostdev pair does get added —
+  one card. Today they can, because this one does not claim it.
+-->
+<domain type='kvm'>
+  <name>@@NAME@@</name>
+  <metadata>
+    <libosinfo:libosinfo xmlns:libosinfo="http://libosinfo.org/xmlns/libvirt/domain/1.0">
+      <libosinfo:os id="http://microsoft.com/win/11"/>
+    </libosinfo:libosinfo>
+  </metadata>
+  <memory unit='KiB'>@@MEMORY_KIB@@</memory>
+  <currentMemory unit='KiB'>@@MEMORY_KIB@@</currentMemory>
+  <vcpu placement='static'>@@VCPU@@</vcpu>
+
+  <os firmware='efi'>
+    <type arch='x86_64' machine='q35'>hvm</type>
+    <firmware>
+      <feature enabled='no' name='enrolled-keys'/>
+      <feature enabled='yes' name='secure-boot'/>
+    </firmware>
+  </os>
+
+  <features>
+    <acpi/>
+    <apic/>
+    <hyperv mode='custom'>
+      <relaxed state='on'/>
+      <vapic state='on'/>
+      <spinlocks state='on' retries='8191'/>
+      <vpindex state='on'/>
+      <synic state='on'/>
+      <stimer state='on'/>
+      <reset state='on'/>
+      <frequencies state='on'/>
+    </hyperv>
+    <vmport state='off'/>
+    <smm state='on'/>
+  </features>
+
+  <cpu mode='host-passthrough' check='none' migratable='on'>
+    <topology sockets='1' dies='1' clusters='1' cores='@@CORES@@' threads='2'/>
+    <cache mode='passthrough'/>
+    <feature policy='require' name='topoext'/>
+  </cpu>
+
+  <clock offset='localtime'>
+    <timer name='rtc' tickpolicy='catchup'/>
+    <timer name='pit' tickpolicy='delay'/>
+    <timer name='hpet' present='no'/>
+    <timer name='hypervclock' present='yes'/>
+  </clock>
+
+  <on_poweroff>destroy</on_poweroff>
+  <on_reboot>restart</on_reboot>
+  <on_crash>destroy</on_crash>
+
+  <pm>
+    <suspend-to-mem enabled='no'/>
+    <suspend-to-disk enabled='no'/>
+  </pm>
+
+  <devices>
+    <emulator>/usr/bin/qemu-system-x86_64</emulator>
+
+    <disk type='file' device='disk'>
+      <driver name='qemu' type='qcow2' cache='none' io='threads' discard='unmap'/>
+      <source file='@@DISK@@'/>
+      <target dev='vda' bus='virtio'/>
+      <boot order='2'/>
+    </disk>
+
+    <!-- Boot order 1. The firmware's "Press any key to boot from CD" window is
+         what guest/build.py spends its first seconds answering; after that
+         window closes on later reboots, the prompt times out and the disk wins. -->
+    <disk type='file' device='cdrom'>
+      <driver name='qemu' type='raw'/>
+      <source file='@@WINISO@@'/>
+      <target dev='sda' bus='sata'/>
+      <readonly/>
+      <boot order='1'/>
+    </disk>
+
+    <disk type='file' device='cdrom'>
+      <driver name='qemu' type='raw'/>
+      <source file='@@VIRTIOISO@@'/>
+      <target dev='sdb' bus='sata'/>
+      <readonly/>
+    </disk>
+
+    <!-- The helper ISO. Setup finds autounattend.xml by scanning drive roots,
+         so this needs no boot entry and no known drive letter. -->
+    <disk type='file' device='cdrom'>
+      <driver name='qemu' type='raw'/>
+      <source file='@@UNATTENDISO@@'/>
+      <target dev='sdc' bus='sata'/>
+      <readonly/>
+    </disk>
+
+    <controller type='usb' index='0' model='qemu-xhci' ports='15'/>
+    <controller type='virtio-serial' index='0'/>
+    <controller type='sata' index='0'/>
+    <controller type='pci' index='0' model='pcie-root'/>
+
+    <interface type='network'>
+      <source network='default'/>
+      <model type='virtio'/>
+    </interface>
+
+    <!-- Without this channel there is no qemu-ga, and without qemu-ga there is
+         no post-install at all. It is the single most load-bearing device here. -->
+    <channel type='unix'>
+      <target type='virtio' name='org.qemu.guest_agent.0'/>
+    </channel>
+    <channel type='spicevmc'>
+      <target type='virtio' name='com.redhat.spice.0'/>
+    </channel>
+
+    <input type='tablet' bus='usb'/>
+    <input type='mouse' bus='ps2'/>
+    <input type='keyboard' bus='ps2'/>
+
+    <!-- Windows 11 wants a TPM 2.0 and a Secure Boot capable firmware; both are
+         here, which is why the unattend carries no hardware-check bypass. -->
+    <tpm model='tpm-crb'>
+      <backend type='emulator' version='2.0'>
+        <profile name='default-v1'/>
+      </backend>
+    </tpm>
+
+    <!-- QXL + SPICE stay for one reason: `virsh screenshot` is the only way to
+         see where an unattended install actually stopped. -->
+    <graphics type='spice' autoport='yes' listen='127.0.0.1'>
+      <listen type='address' address='127.0.0.1'/>
+      <image compression='off'/>
+      <gl enable='no'/>
+    </graphics>
+    <video>
+      <model type='qxl' ram='65536' vram='65536' vgamem='16384' heads='1' primary='yes'/>
+    </video>
+
+    <memballoon model='none'/>
+  </devices>
+</domain>

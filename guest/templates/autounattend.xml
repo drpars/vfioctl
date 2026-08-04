@@ -1,0 +1,282 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  autounattend.xml TEMPLATE — rendered by guest/build.py, never used as-is.
+
+  Placeholders are double-at delimited; the renderer refuses to emit a file with
+  any of them left. The rendered file carries an account name and a plaintext
+  password, so it is machine-local and never enters a repository; only this
+  template does. Rendered output lives 0700 under ~/.images, machine-local.
+
+  Prose here uses em dashes because a literal double hyphen is illegal inside an
+  XML comment; the renderer parses what it produces, so the mistake cannot ship.
+
+  WHY A SEPARATE HELPER ISO. Setup looks for autounattend.xml in the root of
+  every attached drive, so the 8.5 GB Windows ISO is never repacked — a tiny
+  ISO with this file at its root is enough, and it is cheap to rebuild between
+  attempts. That is the whole reason this file can be iterated on at all.
+
+  MEASURED, NOT GUESSED (2026-08-05, tr-TR 25H2 ISO):
+
+    * The ISO has NO sources/EI.cfg, so Setup would show the edition picker.
+      <ImageInstall> answers it.
+    * install.wim holds SIX images and no N editions:
+        1 Home  2 Home Single Language  3 Education
+        4 Pro   5 Pro Education         6 Pro for Workstations
+      The widely repeated "consumer editions" order has eleven images with Pro
+      at index 6 — selecting by INDEX would have installed Pro for
+      Workstations here. The image NAME is in English even on the tr-TR media,
+      so /IMAGE/NAME is both correct and stable across ISO revisions.
+    * The guest passes the Windows 11 hardware checks on its own (TPM 2.0 via
+      tpm-crb, Secure Boot capable firmware, 8 vCPU, 12 GB), which is why there
+      is no LabConfig/bypass block here. The manual install in an earlier
+      session proved it.
+
+  THE viostor FRICTION DIES IN THE windowsPE PASS. The virtio disk is invisible
+  to Setup until viostor is injected. Drive letters are unstable, so every
+  plausible letter is listed; a path that does not exist is ignored. NetKVM
+  rides along for the same price — drivers injected here also land in the
+  installed image, so the guest has network without a second pass.
+
+  THE KEYSTONE IS qemu-ga, NOT THE INSTALL. Everything after this file happens
+  over guest-exec, which does not exist until the agent is running. So the
+  agent install is the one thing this file must not get wrong. It is deliberately
+  NOT an msiexec call in the specialize pass: Windows Installer is not reliably
+  available that early. Instead specialize copies setupcomplete.cmd off the
+  helper ISO into C:\Windows\Setup\Scripts\, and Setup runs it as SYSTEM in a
+  fully-serviced OS right before the first logon.
+-->
+<unattend xmlns="urn:schemas-microsoft-com:unattend">
+
+  <settings pass="windowsPE">
+
+    <component name="Microsoft-Windows-International-Core-WinPE"
+               processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35"
+               language="neutral" versionScope="nonSxS"
+               xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State"
+               xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+      <SetupUILanguage>
+        <UILanguage>@@UILANG@@</UILanguage>
+      </SetupUILanguage>
+      <InputLocale>@@INPUTLOCALE@@</InputLocale>
+      <SystemLocale>@@SYSLOCALE@@</SystemLocale>
+      <UILanguage>@@UILANG@@</UILanguage>
+      <UserLocale>@@USERLOCALE@@</UserLocale>
+    </component>
+
+    <!-- THREE DRIVERS, THREE DISTINCT REASONS. None is decoration:
+
+           viostor   the boot disk is virtio-blk and Setup cannot see it at all
+                     without this. Miss it and there is no disk to install to.
+           NetKVM    the guest's network.
+           vioserial the transport qemu-ga talks over. MEASURED THE HARD WAY on
+                     2026-08-05: the first round injected only the first two,
+                     the agent installed cleanly and its service was RUNNING,
+                     and the host still got "QEMU guest agent is not connected"
+                     — a running agent with no channel looks exactly like an
+                     agent that was never installed. The DriverStore had
+                     viostor and netkvm and no vioser.
+
+         Drive letters are unstable; list them all. Nonexistent paths are
+         skipped, so the cost of an extra letter is nothing. -->
+    <component name="Microsoft-Windows-PnpCustomizationsWinPE"
+               processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35"
+               language="neutral" versionScope="nonSxS"
+               xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State"
+               xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+      <DriverPaths>
+        <PathAndCredentials wcm:action="add" wcm:keyValue="1"><Path>D:\viostor\w11\amd64</Path></PathAndCredentials>
+        <PathAndCredentials wcm:action="add" wcm:keyValue="2"><Path>E:\viostor\w11\amd64</Path></PathAndCredentials>
+        <PathAndCredentials wcm:action="add" wcm:keyValue="3"><Path>F:\viostor\w11\amd64</Path></PathAndCredentials>
+        <PathAndCredentials wcm:action="add" wcm:keyValue="4"><Path>G:\viostor\w11\amd64</Path></PathAndCredentials>
+        <PathAndCredentials wcm:action="add" wcm:keyValue="5"><Path>H:\viostor\w11\amd64</Path></PathAndCredentials>
+        <PathAndCredentials wcm:action="add" wcm:keyValue="6"><Path>D:\NetKVM\w11\amd64</Path></PathAndCredentials>
+        <PathAndCredentials wcm:action="add" wcm:keyValue="7"><Path>E:\NetKVM\w11\amd64</Path></PathAndCredentials>
+        <PathAndCredentials wcm:action="add" wcm:keyValue="8"><Path>F:\NetKVM\w11\amd64</Path></PathAndCredentials>
+        <PathAndCredentials wcm:action="add" wcm:keyValue="9"><Path>G:\NetKVM\w11\amd64</Path></PathAndCredentials>
+        <PathAndCredentials wcm:action="add" wcm:keyValue="10"><Path>H:\NetKVM\w11\amd64</Path></PathAndCredentials>
+        <PathAndCredentials wcm:action="add" wcm:keyValue="11"><Path>D:\vioserial\w11\amd64</Path></PathAndCredentials>
+        <PathAndCredentials wcm:action="add" wcm:keyValue="12"><Path>E:\vioserial\w11\amd64</Path></PathAndCredentials>
+        <PathAndCredentials wcm:action="add" wcm:keyValue="13"><Path>F:\vioserial\w11\amd64</Path></PathAndCredentials>
+        <PathAndCredentials wcm:action="add" wcm:keyValue="14"><Path>G:\vioserial\w11\amd64</Path></PathAndCredentials>
+        <PathAndCredentials wcm:action="add" wcm:keyValue="15"><Path>H:\vioserial\w11\amd64</Path></PathAndCredentials>
+      </DriverPaths>
+    </component>
+
+    <component name="Microsoft-Windows-Setup"
+               processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35"
+               language="neutral" versionScope="nonSxS"
+               xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State"
+               xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+
+      <!-- GPT/UEFI: ESP + MSR + one OS partition that takes the rest. No separate
+           recovery partition; WinRE lands inside the OS partition, which Setup
+           accepts. DiskID 0 is the only disk in the domain — the CD-ROMs are
+           not disks. -->
+      <DiskConfiguration>
+        <WillShowUI>OnError</WillShowUI>
+        <Disk wcm:action="add">
+          <DiskID>0</DiskID>
+          <WillWipeDisk>true</WillWipeDisk>
+          <CreatePartitions>
+            <CreatePartition wcm:action="add">
+              <Order>1</Order><Type>EFI</Type><Size>260</Size>
+            </CreatePartition>
+            <CreatePartition wcm:action="add">
+              <Order>2</Order><Type>MSR</Type><Size>16</Size>
+            </CreatePartition>
+            <CreatePartition wcm:action="add">
+              <Order>3</Order><Type>Primary</Type><Extend>true</Extend>
+            </CreatePartition>
+          </CreatePartitions>
+          <ModifyPartitions>
+            <ModifyPartition wcm:action="add">
+              <Order>1</Order><PartitionID>1</PartitionID>
+              <Format>FAT32</Format><Label>System</Label>
+            </ModifyPartition>
+            <ModifyPartition wcm:action="add">
+              <Order>2</Order><PartitionID>2</PartitionID>
+            </ModifyPartition>
+            <ModifyPartition wcm:action="add">
+              <Order>3</Order><PartitionID>3</PartitionID>
+              <Format>NTFS</Format><Label>Windows</Label><Letter>C</Letter>
+            </ModifyPartition>
+          </ModifyPartitions>
+        </Disk>
+      </DiskConfiguration>
+
+      <ImageInstall>
+        <OSImage>
+          <InstallFrom>
+            <MetaData wcm:action="add">
+              <Key>/IMAGE/NAME</Key>
+              <Value>@@IMAGENAME@@</Value>
+            </MetaData>
+          </InstallFrom>
+          <InstallTo>
+            <DiskID>0</DiskID>
+            <PartitionID>3</PartitionID>
+          </InstallTo>
+          <WillShowUI>OnError</WillShowUI>
+        </OSImage>
+      </ImageInstall>
+
+      <UserData>
+        <!-- An empty Key is not an omission: it is what tells Setup there is no
+             product key and to stop asking. -->
+        <ProductKey>
+          <Key/>
+        </ProductKey>
+        <AcceptEula>true</AcceptEula>
+      </UserData>
+
+    </component>
+  </settings>
+
+  <settings pass="specialize">
+
+    <component name="Microsoft-Windows-Shell-Setup"
+               processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35"
+               language="neutral" versionScope="nonSxS"
+               xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State"
+               xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+      <ComputerName>@@HOSTNAME@@</ComputerName>
+      <TimeZone>@@TIMEZONE@@</TimeZone>
+    </component>
+
+    <!-- Stage the post-Setup script. The helper ISO's letter is as unstable as
+         any other, so the copy probes for a marker file instead of assuming. -->
+    <component name="Microsoft-Windows-Deployment"
+               processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35"
+               language="neutral" versionScope="nonSxS"
+               xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State"
+               xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+      <RunSynchronous>
+        <RunSynchronousCommand wcm:action="add">
+          <Order>1</Order>
+          <Description>create C:\Windows\Setup\Scripts</Description>
+          <Path>cmd /c md C:\Windows\Setup\Scripts</Path>
+        </RunSynchronousCommand>
+        <RunSynchronousCommand wcm:action="add">
+          <Order>2</Order>
+          <Description>stage SetupComplete.cmd from the helper ISO</Description>
+          <Path>cmd /c for %i in (D E F G H I) do @if exist %i:\qemu-vfio\setupcomplete.cmd copy /y %i:\qemu-vfio\setupcomplete.cmd C:\Windows\Setup\Scripts\SetupComplete.cmd</Path>
+        </RunSynchronousCommand>
+      </RunSynchronous>
+    </component>
+  </settings>
+
+  <settings pass="oobeSystem">
+
+    <component name="Microsoft-Windows-International-Core"
+               processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35"
+               language="neutral" versionScope="nonSxS"
+               xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State"
+               xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+      <InputLocale>@@INPUTLOCALE@@</InputLocale>
+      <SystemLocale>@@SYSLOCALE@@</SystemLocale>
+      <UILanguage>@@UILANG@@</UILanguage>
+      <UserLocale>@@USERLOCALE@@</UserLocale>
+    </component>
+
+    <component name="Microsoft-Windows-Shell-Setup"
+               processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35"
+               language="neutral" versionScope="nonSxS"
+               xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State"
+               xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+
+      <!-- A local account defined here is what keeps OOBE away from the network
+           and the Microsoft-account screens; that path does not depend on the
+           BypassNRO trick Microsoft removed in 24H2. -->
+      <!-- PlainText, deliberately. Microsoft's alternative is base64 of
+           UTF-16LE(password + the element's own name), which is reversible by
+           anyone holding the file and therefore protects nothing; what it does
+           add is a guess about which element name to append, and a wrong guess
+           fails silently as an account whose password nobody knows. The
+           rendered file lives 0600 in a 0700 directory and never leaves this
+           machine — that is the actual protection. -->
+      <UserAccounts>
+        <LocalAccounts>
+          <LocalAccount wcm:action="add">
+            <Name>@@USER@@</Name>
+            <DisplayName>@@USER@@</DisplayName>
+            <Group>Administrators</Group>
+            <Password>
+              <Value>@@PASSWORD@@</Value>
+              <PlainText>true</PlainText>
+            </Password>
+          </LocalAccount>
+        </LocalAccounts>
+      </UserAccounts>
+
+      <!-- THERE IS NO <AutoLogon> BLOCK HERE, AND THAT IS A MEASUREMENT, NOT AN
+           OVERSIGHT. The console session does have to be logged in for anything
+           touching the display to work, because guest-exec runs in session 0
+           where there are no display devices. But on 25H2 OOBE
+           throws the answer file's autologon away:
+
+             [CloudExperienceHostBroker.exe] Setting auto logon with
+                 fUseAuthBuffer = 1, fEnableAutologon = 0
+             [CloudExperienceHostBroker.exe] Clearing Auto-logon values per request
+
+           (C:\Windows\Panther\UnattendGC\setupact.log, 2026-08-05.) A block
+           that is silently discarded is worse than no block, because the next
+           reader assumes it works. Autologon is set by the host afterwards over
+           guest-exec instead — see guest/build.py. SetupComplete.cmd cannot
+           do it either: it runs at 00:51:20 and OOBE clears the values at
+           00:52:51, a minute and a half later. -->
+
+      <OOBE>
+        <HideEULAPage>true</HideEULAPage>
+        <HideLocalAccountScreen>true</HideLocalAccountScreen>
+        <HideOEMRegistrationScreen>true</HideOEMRegistrationScreen>
+        <HideOnlineAccountScreens>true</HideOnlineAccountScreens>
+        <HideWirelessSetupInOOBE>true</HideWirelessSetupInOOBE>
+        <ProtectYourPC>3</ProtectYourPC>
+      </OOBE>
+
+      <TimeZone>@@TIMEZONE@@</TimeZone>
+
+    </component>
+  </settings>
+
+</unattend>

@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# gitleaks pre-commit -- stops the commit if staged content holds a secret.
+#
+# This repository renders answer files that contain a guest password, so the
+# one mistake worth a hook is committing a rendered file instead of a template.
+#
+# The hook is versioned and cloned; the setting that activates it is not.
+# Once per clone:
+#     git config core.hooksPath .githooks
+#
+# gitleaks 8.19 replaced `protect` with `git --staged`, and `protect` still
+# works. Which one is installed is not known when this is written, so the
+# subcommand is picked at run time.
+
+set -uo pipefail
+
+if ! command -v gitleaks >/dev/null 2>&1; then
+    printf '\033[1;31mpre-commit: gitleaks is not installed, commit stopped.\033[0m\n'
+    printf 'Install: sudo pacman -S gitleaks\n'
+    printf 'Skip:    git commit --no-verify   (only if you know why)\n'
+    exit 1
+fi
+
+if gitleaks protect --help >/dev/null 2>&1; then
+    gitleaks protect --staged --redact --verbose
+else
+    gitleaks git --staged --redact --verbose .
+fi
+STATUS=$?
+
+if [[ $STATUS -ne 0 ]]; then
+    printf '\n\033[1;31mpre-commit: gitleaks reported a finding, commit stopped.\033[0m\n'
+    printf 'If it is a false positive, add the fingerprint to .gitleaksignore.\n'
+    exit 1
+fi
+
+exit 0

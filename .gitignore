@@ -1,0 +1,25 @@
+# Rendered artefacts are machine-local by design: they carry the guest account
+# name and password. Only the templates are versioned. They normally live under
+# ~/.images, but a stray copy here must never become a commit.
+autounattend.xml
+!guest/templates/autounattend.xml
+*-unattend/
+*.qcow2
+*.iso
+
+# Extensions that can hold secrets. Nothing matches today; this is accident
+# insurance.
+*.env
+*.key
+*.pem
+*.p12
+*.pfx
+
+# Python
+__pycache__/
+*.pyc
+
+# Editor / system leftovers
+*.swp
+*~
+.DS_Store
