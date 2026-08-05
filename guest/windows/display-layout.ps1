@@ -32,7 +32,7 @@
     target path: it must be somewhere the console user can READ, and
     C:\Windows\Temp is not (the task silently produced nothing until this moved).
 
-    build.py's `setup` pushes it to C:\Users\Public\vfioctl\ and runs it there:
+    `vfioctl guest setup` pushes it to C:\Users\Public\vfioctl\ and runs it there:
 
         powershell -ExecutionPolicy Bypass -File C:\Users\Public\vfioctl\display-layout.ps1
 

@@ -22,7 +22,7 @@
 
     Run it as SYSTEM through the agent, like the others:
 
-        ./guest/build.py --name <domain> setup
+        ./vfioctl guest --name <domain> setup
 
     which runs it only when the domain actually claims a PCI function -- there
     is nothing to install on the cardless rehearsal.

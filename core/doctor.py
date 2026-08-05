@@ -226,7 +226,7 @@ def _check_lg_release() -> Check:
     so the answer is available on a machine where no domain has ever been
     defined -- which is where a client upgrade lands. What the guest actually
     carries is a different reading, and it belongs where a guest is reachable
-    (guest/build.py); doctor writes nothing and starts nothing.
+    (`vfioctl guest`); doctor writes nothing and starts nothing.
     """
     client = lookingglass.client_release()
     pin = lookingglass.read_pin()

@@ -10,7 +10,7 @@
     as NT AUTHORITY\SYSTEM -- no SSH, no network share, no interactive session.
     The channel is the guest agent; commands land as SYSTEM in session 0.
 
-        ./guest/build.py --name <domain> setup
+        ./vfioctl guest --name <domain> setup
 
     which pushes it to C:\Users\Public\vfioctl\ and runs it there, then reads
     the guest's monitor inventory back rather than trusting this script's word.

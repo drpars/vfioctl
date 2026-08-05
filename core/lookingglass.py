@@ -221,6 +221,6 @@ def remedy(client: str | None, guest: str | None) -> str:
         f"Misafir tarafı istemcinin sürümüne çekilir: {artifact_url(client)}\n"
         f"  {PS1.name} içinde $Version, $Url ve $Sha256 ÜÇÜ BİRLİKTE "
         f"güncellenir (sha256 yalnızca tek bir sürüm için geçerli), sonra\n"
-        f"  ./guest/build.py --name <domain> setup"
+        f"  ./vfioctl guest --name <domain> setup"
         + (f"\n  Misafirde şu an {guest} var." if guest else "")
     )

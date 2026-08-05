@@ -1,13 +1,15 @@
-#!/usr/bin/env python3
 """Build a Windows guest unattended, from a blank disk to a reachable qemu-ga.
 
-    ./guest/build.py build           # the whole round, ~7-10 min, unattended
-    ./guest/build.py setup           # push and drive the guest-side scripts
-    ./guest/build.py passthrough     # give the domain the dGPU (or --off)
-    ./guest/build.py status          # where is it now
-    ./guest/build.py screenshot      # what is on its screen
-    ./guest/build.py autologon       # re-run just the console-session step
-    ./guest/build.py clean           # undefine + delete disk, nvram, helper ISO
+    ./vfioctl guest build            # the whole round, ~7-10 min, unattended
+    ./vfioctl guest setup            # push and drive the guest-side scripts
+    ./vfioctl guest passthrough      # give the domain the dGPU (or --off)
+    ./vfioctl guest status           # where is it now
+    ./vfioctl guest screenshot       # what is on its screen
+    ./vfioctl guest autologon        # re-run just the console-session step
+    ./vfioctl guest clean            # undefine + delete disk, nvram, helper ISO
+
+    THIS FILE IS NOT RUNNABLE ON ITS OWN (K15). It is reached through the one
+    entry point above; a second runnable name is the one that goes stale.
 
 WHAT THIS REPLACES. Five stages used to be done by hand: defining the domain,
 answering Setup, waiting for the agent, opening a console session, and running
@@ -1821,8 +1823,16 @@ def cmd_clean(a):
 
 # --------------------------------------------------------------------------- #
 
-def main():
+def main(argv: list[str] | None = None) -> int:
+    """The guest side's subcommands, parsed. NOT AN ENTRY POINT ANY MORE.
+
+    It is reached as `vfioctl guest ...` and nowhere else: one job, one runnable
+    name (K15). This file kept its own `__main__` while the guest side was being
+    built, which is why prog= has to be spelled out -- argparse would otherwise
+    name the program after this file and print help nobody can copy.
+    """
     p = argparse.ArgumentParser(
+        prog="vfioctl guest",
         description="Windows misafirini gözetimsiz kur (autounattend.xml turu)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
@@ -1891,7 +1901,7 @@ def main():
     c = sub.add_parser("clean", help="domain + disk + çalışma dizini sil")
     c.set_defaults(func=cmd_clean)
 
-    a = p.parse_args()
+    a = p.parse_args(argv)
 
     if getattr(a, "win_iso", None) == "":
         found = sorted(Path.home().glob("İndirilenler/*windows*11*.iso"))
@@ -1899,8 +1909,4 @@ def main():
             die("Windows ISO'su bulunamadı, --win-iso ile ver")
         a.win_iso = str(found[-1])
 
-    sys.exit(a.func(a))
-
-
-if __name__ == "__main__":
-    main()
+    return a.func(a)

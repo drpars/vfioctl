@@ -9,7 +9,7 @@
     THIS IS NOW CHECKED ON THE HOST, AND $Version BELOW IS WHAT IT READS.
     core/lookingglass.py parses that line out of this file and compares it with
     the release of the installed client; `vfioctl doctor` reports the pair and
-    `build.py setup` refuses to run this script when the two differ. So the
+    `vfioctl guest setup` refuses to run this script when the two differ. So the
     three parameters move TOGETHER and stay in the shape below -- $Sha256 is
     only valid for one release, and a $Version that disagrees with $Url would
     make every reading downstream wrong about what the guest is carrying.
@@ -21,7 +21,7 @@
 
     Run it the same way as guest/windows/vdd.ps1, through the agent as SYSTEM:
 
-        ./guest/build.py --name <domain> setup
+        ./vfioctl guest --name <domain> setup
 
     PRECONDITION: the ivshmem device must already be in the domain, otherwise
     the installer stages a driver with nothing to bind to and the host service

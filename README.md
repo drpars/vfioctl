@@ -64,7 +64,8 @@ kullanıcının makinesinde `doctor` ile yapılır.** Başka bir compositor'de
 ## Bugün ne var
 
 ```
-vfioctl                   # giriş noktası: doctor, profiles, install, uninstall, selftest
+vfioctl                   # TEK giriş noktası: doctor, profiles, install,
+│                         # uninstall, selftest + guest <alt komut>
 core/                     # probe (makineyi okur) + profile + doctor/gate
 │                         # + session (seans yarısını ölçer, yazmaz)
 │                         # + hostfiles/install (host tarafı) + selftest
@@ -72,6 +73,7 @@ data/50-vfio-handover     # devri yapan libvirt hook'u
 profiles/                 # tanınan makineler, birer .toml
 guest/
 ├── build.py              # boş diskten konsol oturumu açık Windows'a, gözetimsiz
+│                         # (kendi başına koşulmaz -- `vfioctl guest`)
 ├── templates/            # autounattend.xml, domain.xml, SetupComplete.cmd
 └── windows/              # misafirde SYSTEM olarak koşan kurulum betikleri
 ```
@@ -166,13 +168,20 @@ arda beş kez.
 ### Misafir inşası
 
 ```sh
-./guest/build.py build --user <ad> --password-file <yol>
-./guest/build.py setup          # (kart varsa NVIDIA) → VDD → Looking Glass → tek ekran
-./guest/build.py passthrough    # domain'e kartı ver (geri almak: --off)
-./guest/build.py setup --start  # domain'i başlat + turu koş (kartlıysa: düz VT)
-./guest/build.py status
-./guest/build.py clean
+./vfioctl guest build --user <ad> --password-file <yol>
+./vfioctl guest setup          # (kart varsa NVIDIA) → VDD → Looking Glass → tek ekran
+./vfioctl guest passthrough    # domain'e kartı ver (geri almak: --off)
+./vfioctl guest setup --start  # domain'i başlat + turu koş (kartlıysa: düz VT)
+./vfioctl guest status
+./vfioctl guest clean
 ```
+
+**Misafir tarafı ayrı bir çalıştırılabilir değil, bir ad alanı.** İki yarının
+ön koşulları ayrı: yukarısı `sudo` ile `/etc`'ye yazar ve hiçbir misafire
+dokunmaz, `guest` altı libvirt'e ve çalışan bir Windows'a konuşur, root
+istemez. Tek düz listeye dökmek bu ayrımı yardım sayfasında görünmez kılardı;
+ayrı çalıştırılabilir bırakmak ise ikinci bir ad demekti — bayatlayan hep o
+olur, çünkü onu kimse sınamaz. `vfioctl guest --help` kendi yardımını basar.
 
 Bu makinede ölçüldü: boş diskten ajanı ulaşılabilir, konsol oturumu açık bir
 Windows 11 Pro 25H2'ye **7 dk 33 sn**, elle adım yok.

@@ -7,6 +7,7 @@
     ./vfioctl install --check     # compare /etc with what install would write
     ./vfioctl uninstall           # take it back out
     ./vfioctl selftest            # five handover rounds, judged and logged
+    ./vfioctl guest setup         # the guest side -- `guest --help` for its own
 
 EVERY WRITING SUBCOMMAND GOES THROUGH doctor.gate() AND NONE OF THEM DERIVES
 ITS OWN CHECK. There is one answer to "may we write on this machine" so that
@@ -18,17 +19,30 @@ and reads. The card is moved by the libvirt hook, as root, under libvirtd,
 behind its own lsmod gate -- one writer, on purpose. Writing to unbind or
 drivers_probe from anywhere else is what wedged this machine three times.
 
-THE GUEST BUILD IS STILL ITS OWN ENTRY POINT (guest/build.py). It folds in
-when the guest side is finished; wiring it in now would mean designing that
-subcommand twice.
+THE GUEST SIDE IS A NAMESPACE, NOT A FLATTENED LIST (K15, decided once the
+guest side was finished -- deciding earlier would have meant designing this
+subcommand twice). `vfioctl guest <cmd>` rather than seven more names beside
+install and selftest, because the two halves differ in what they need before
+they can run: everything above writes to /etc through sudo and touches no
+guest, everything under `guest` talks to libvirt and a running Windows and
+wants no root at all. Folding them into one list would hide that distinction
+in a help page and put two different `status` in one namespace.
+
+guest/build.py IS NO LONGER RUNNABLE ON ITS OWN, and that is the point: one
+job, one runnable name. The second name is what goes stale, because nothing
+tests it.
 """
 
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import sys
+from pathlib import Path
 
 from core import doctor, install as install_mod, profile as profile_mod, selftest
+
+HERE = Path(__file__).resolve().parent
 
 
 def cmd_doctor(args) -> int:
@@ -71,7 +85,57 @@ def cmd_selftest(args) -> int:
     )
 
 
+def split_guest(argv: list[str]) -> tuple[list[str], list[str]] | None:
+    """(what came before `guest`, what came after), or None if this is not it.
+
+    THE HANDOFF HAPPENS BEFORE argparse, NOT THROUGH IT. argparse's REMAINDER
+    only starts capturing at the first token that does not look like an option,
+    so `vfioctl guest --help` and `vfioctl guest --name win11-test setup` were
+    read as THIS parser's flags and rejected (measured, both of them -- and the
+    second is the form the guest scripts' own headers tell a reader to type).
+    Splitting here is what makes the namespace transparent: everything after
+    `guest` belongs to the parser that owns it, options included.
+    """
+    i = 0
+    while i < len(argv):
+        token = argv[i]
+        if token == "guest":
+            return argv[:i], argv[i + 1:]
+        # --profile is this parser's only value-taking option; skipping its
+        # argument keeps a domain that happens to be called "guest" from
+        # looking like the subcommand.
+        i += 2 if token == "--profile" else 1
+        if token.startswith("-"):
+            continue
+        return None
+    return None
+
+
+def cmd_guest(head: list[str], rest: list[str]) -> int:
+    """Hand the rest of the command line to the guest side, unread.
+
+    guest/ is not a package -- it is a directory next to this file -- so the
+    module is loaded by path, the same way build.py reaches core/. Nothing here
+    interprets the arguments: they are parsed once, by the parser that owns
+    them, so a flag added there needs no edit here.
+    """
+    if head:
+        print(f"vfioctl: {' '.join(head)} misafir tarafından önce verilemez -- "
+              "bu seçenekler alt komuttan sonra gelir, örn. "
+              "`vfioctl guest passthrough --profile <ad>`", file=sys.stderr)
+        return 2
+    path = HERE / "guest" / "build.py"
+    spec = importlib.util.spec_from_file_location("vfioctl_guest_build", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.main(rest)
+
+
 def main() -> int:
+    split = split_guest(sys.argv[1:])
+    if split is not None:
+        return cmd_guest(*split)
+
     parser = argparse.ArgumentParser(
         prog="vfioctl",
         description="VFIO GPU passthrough kurulumunu kur, ölç ve sür",
@@ -120,6 +184,12 @@ def main() -> int:
     st.add_argument("--yes", action="store_true",
                     help="VT uyarısını sorma")
     st.set_defaults(func=cmd_selftest)
+
+    # REGISTERED SO THAT `vfioctl --help` LISTS THE NAMESPACE, never dispatched:
+    # split_guest() has already handed the line over by the time parse_args runs.
+    sub.add_parser("guest", help="misafir tarafı (kur, sür, kartı ver) -- "
+                                 "kendi yardımı: guest --help",
+                   add_help=False)
 
     args = parser.parse_args()
     return args.func(args)
