@@ -5,10 +5,11 @@ VFIO passthrough kurulumunu kuran, ölçen ve süren CLI aracı.
 🇬🇧 CLI tool that installs, checks and drives a VFIO passthrough setup which
 hands a laptop's discrete GPU to a Windows guest.
 
-> **Durum: yapım aşamasında.** Bugün burada **donanım kapısı** (`doctor`),
-> **host kurulumu** (`install` / `uninstall` / `selftest`) ve **misafir
-> inşası** (`guest/`) var. Kalan: misafir tarafının üç betiğini süren kod
-> (Faz 3) ve envanter (Faz 4).
+> **Durum: yol uçtan uca çalışıyor, bu makinede ölçülmüş hâliyle.** Boş
+> diskten, kartı devredilmiş ve Looking Glass'ın o kart üzerinde yakaladığı bir
+> Windows misafirine kadar her adım burada: **donanım kapısı** (`doctor`),
+> **host kurulumu** (`install` / `uninstall` / `selftest`) ve **misafir inşası
+> + sürülmesi** (`guest/`). Kalan: envanter ve ek cihaz devri (Faz 4).
 
 ## Neden ayrı bir proje
 
@@ -215,8 +216,12 @@ olduğu — koddan değerli; oralar okunmadan değiştirilmemeli.
 | 0 | taşınma + iskelet ✅ |
 | 1 | kapı: donanım profili biçimi, `doctor`, seans yarısının ölçümü ✅ |
 | 2 | host kurulumu: devir hook'u, udev kuralları, Looking Glass host yarısı ✅ |
-| 3 | misafir inşasının kalan yarısı: üç PS1 betiğini süren kod ← **buradayız** |
-| 4 | envanter, ek cihaz devri (Bluetooth, ikinci NVMe) |
+| 3 | misafir inşasının kalan yarısı: misafir betiklerini süren kod ✅ |
+| 4 | envanter, ek cihaz devri (Bluetooth, ikinci NVMe) ← **buradayız** |
+
+Faz 3'ün kabul ölçütü bu makinede karşılandı: kartsız prova ve kartlı tur geçti
+(LG host günlüğü kartı adıyla yazıp `Capture Start` dedi, VDD ekranı 2560x1440),
+ardından çalışan misafirde `selftest` yine 5/5 temiz çıktı.
 
 ## Gereksinimler
 
