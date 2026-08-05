@@ -2,7 +2,7 @@
 """Build a Windows guest unattended, from a blank disk to a reachable qemu-ga.
 
     ./guest/build.py build           # the whole round, ~7-10 min, unattended
-    ./guest/build.py setup           # push and drive the three guest scripts
+    ./guest/build.py setup           # push and drive the guest-side scripts
     ./guest/build.py passthrough     # give the domain the dGPU (or --off)
     ./guest/build.py status          # where is it now
     ./guest/build.py screenshot      # what is on its screen
@@ -15,7 +15,7 @@ the three post-install scripts. All five are here now. `build` stops at a guest
 that can be driven; `setup` is the half that drives it, separate because a
 guest is worth building for reasons that have nothing to do with the display.
 
-WHAT `setup` MEASURES RATHER THAN CLAIMS. Each of the three scripts installs
+WHAT `setup` MEASURES RATHER THAN CLAIMS. Each script in the chain installs
 something the next one needs, so between them the guest's own inventory is read
 back: the monitor VDD created, the Looking Glass service's state, the display
 topology's verdict, and at the end the adapter Looking Glass actually captures
@@ -899,7 +899,7 @@ def wait_for_agent(name: str, workdir: Path, timeout_min: int) -> bool:
 
 
 # --------------------------------------------------------------------------- #
-# the guest-side setup: three scripts, pushed and driven
+# the guest-side setup: a chain of scripts, pushed and driven
 # --------------------------------------------------------------------------- #
 
 WINDOWS = HERE / "windows"
@@ -1119,7 +1119,23 @@ def choose_gpu(name: str, expect_card: bool = False) -> str | None:
     candidates = [a for a in real
                   if QXL_HWID not in (a.get("PNPDeviceID") or "").upper()]
     if len(candidates) == 1:
-        return candidates[0].get("Name")
+        chosen = candidates[0].get("Name")
+        # A UNIQUE DEVICE IS NOT A UNIQUE NAME, and the name is all VDD gets.
+        # Measured: before its driver is installed the card calls itself
+        # "Microsoft Basic Display Adapter" -- the same string the emulated
+        # adapter carries -- so the settings file would match both and the
+        # indirect display could render on either. Refusing here is the whole
+        # point of the function; passing the name on would be the silent
+        # failure it exists to prevent.
+        twins = [a for a in adapters
+                 if a is not candidates[0] and a.get("Name") == chosen]
+        if twins:
+            say(f"  seçilen bağdaştırıcının adı ('{chosen}') benzersiz değil -- "
+                f"{len(twins)} bağdaştırıcı daha aynı adı taşıyor")
+            say("  VDD adla eşleştirir; bu ad yanlış olana da uyar. Kartın "
+                "sürücüsü kurulu mu?")
+            return None
+        return chosen
     if not candidates:
         if expect_card:
             say("  domain kartı alıyor ama misafirde kart görünmüyor -- bu bir "
@@ -1235,7 +1251,7 @@ def start_for_setup(a, name: str, workdir: Path) -> bool:
 
 
 def guest_setup(a, name: str) -> int:
-    """Drive the three guest scripts in order, stopping at the first failure.
+    """Drive the guest-side scripts in order, stopping at the first failure.
 
     THE ORDER IS A DEPENDENCY, NOT A PREFERENCE. display-layout has nothing to
     isolate until VDD's screen exists, and Looking Glass captures whatever the
@@ -1285,6 +1301,26 @@ def guest_setup(a, name: str) -> int:
         for device in display_devices(name):
             say(f"  PnP: {device.get('Status')} problem={device.get('Problem')} "
                 f"{device.get('FriendlyName')} [{device.get('InstanceId')}]")
+
+        # 0. the card's own driver, and only when there is a card. A handed-over
+        # GPU running on Windows' inbox display driver is not a usable adapter
+        # (problem=10, measured), and it does not even carry a distinguishable
+        # name yet -- so this has to come before the adapter is chosen, not
+        # after. There is nothing to install on the cardless rehearsal.
+        if not run_guest_script(name, WINDOWS / "nvidia.ps1", [], timeout=2400):
+            say("ADIM DÜŞTÜ -- kartın sürücüsü kurulamadı.")
+            return 1
+        stuck = [d for d in display_devices(name)
+                 if (d.get("InstanceId") or "").upper().startswith("PCI\\")
+                 and QXL_HWID not in (d.get("InstanceId") or "").upper()
+                 and d.get("Problem") not in (0, None)]
+        for device in stuck:
+            say(f"  PnP: {device.get('Status')} problem={device.get('Problem')} "
+                f"{device.get('FriendlyName')} [{device.get('InstanceId')}]")
+        if stuck:
+            say("ADIM DÜŞTÜ -- devredilen ekran cihazı sürücüden sonra da "
+                "çalışmıyor.")
+            return 1
 
     gpu = a.gpu_name or choose_gpu(name, expect_card=bool(claims))
     if not gpu:
@@ -1352,7 +1388,7 @@ def guest_setup(a, name: str) -> int:
         # Measured, and it is the hardware's answer rather than a defect: with
         # no real GPU in the guest neither D12 nor DXGI finds a supported
         # adapter, so the host exits and the service restarts it forever. The
-        # rehearsal is about the three scripts running in order; making its
+        # rehearsal is about the scripts running in order; making its
         # normal outcome a red line would teach the reader to skip the line.
         say("  LG yakalama: YOK -- kartsız provada beklenen. Gerçek bir "
             "bağdaştırıcı olmadan D12 de DXGI de yakalayamıyor; servis "

@@ -166,7 +166,7 @@ arda beş kez.
 
 ```sh
 ./guest/build.py build --user <ad> --password-file <yol>
-./guest/build.py setup          # VDD → Looking Glass host → tek ekran
+./guest/build.py setup          # (kart varsa NVIDIA) → VDD → Looking Glass → tek ekran
 ./guest/build.py passthrough    # domain'e kartı ver (geri almak: --off)
 ./guest/build.py setup --start  # domain'i başlat + turu koş (kartlıysa: düz VT)
 ./guest/build.py status
@@ -176,9 +176,11 @@ arda beş kez.
 Bu makinede ölçüldü: boş diskten ajanı ulaşılabilir, konsol oturumu açık bir
 Windows 11 Pro 25H2'ye **7 dk 33 sn**, elle adım yok.
 
-`setup`, `guest/windows/` altındaki üç betiği misafire iter ve sırayla koşar.
+`setup`, `guest/windows/` altındaki betikleri misafire iter ve sırayla koşar.
 Sıra bir bağımlılık: ekran topolojisinin yalıtacak bir şeyi olması için önce
-VDD'nin ekranı doğmalı. Bu yüzden her adım **kurucunun çıkış kodunu değil
+VDD'nin ekranı doğmalı, VDD'nin render edeceği kartın da adını taşıyabilmesi
+için önce sürücüsü kurulmalı. **Sürücü adımı yalnızca domain kartı alıyorken
+koşar** — kartsız provada kurulacak bir şey yok. Bu yüzden her adım **kurucunun çıkış kodunu değil
 misafirin envanterini** okur — VDD'nin oluşturduğu monitör, LG servisinin
 durumu, topolojinin kendi hükmü. VDD'nin render edeceği bağdaştırıcı da
 misafirde keşfedilir (`--gpu-name` ile geçilebilir): adı yalnızca Windows
