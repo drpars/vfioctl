@@ -1041,7 +1041,36 @@ def _ps_quote(text: str) -> str:
     return "'" + text.replace("'", "''") + "'"
 
 
-def lg_capture_device(name: str, gpu: str) -> tuple[list[str], bool | None]:
+def _core_lg():
+    """core.lookingglass, imported the way core.doctor is: late and by path.
+
+    Both halves of the version question have one owner and it lives in core/,
+    because doctor asks it too and a second copy here would be a second answer.
+    """
+    sys.path.insert(0, str(HERE.parent))
+    from core import lookingglass
+    return lookingglass
+
+
+def lg_host_log(name: str) -> list[str] | None:
+    """The guest's own Looking Glass host log, or None when there is none.
+
+    Read in one round trip and handed to the callers that want different
+    sentences out of it -- which release is running (its first lines) and
+    whether capture started (its last). Asking the guest twice for the same
+    file would let the two answers come from two different processes, since
+    the host rotates the file per capture attempt.
+    """
+    code, out, _ = powershell(name, ["-Command",
+        f"$p={_ps_quote(LG_HOST_LOG)}; if (Test-Path -LiteralPath $p) "
+        f"{{ Get-Content -LiteralPath $p }} else {{ 'NOLOG' }}"], timeout=120)
+    if code != 0 or out.strip() in ("", "NOLOG"):
+        return None
+    return out.splitlines()
+
+
+def lg_capture_device(name: str, gpu: str,
+                      log: list[str] | None = None) -> tuple[list[str], bool | None]:
     """Is Looking Glass really capturing, and on the adapter VDD renders on?
 
     THIS IS THE EVIDENCE HALF OF THE CARD-SIDE ROUND, and the measurement that
@@ -1061,13 +1090,11 @@ def lg_capture_device(name: str, gpu: str) -> tuple[list[str], bool | None]:
     log cannot be read or says neither -- unknown is reported as unknown rather
     than counted as a pass.
     """
-    code, out, _ = powershell(name, ["-Command",
-        f"$p={_ps_quote(LG_HOST_LOG)}; if (Test-Path -LiteralPath $p) "
-        f"{{ Get-Content -LiteralPath $p }} else {{ 'NOLOG' }}"], timeout=120)
-    if code != 0 or out.strip() in ("", "NOLOG"):
+    if log is None:
+        log = lg_host_log(name)
+    if log is None:
         return [], None
 
-    log = out.splitlines()
     lines = [line.strip() for line in log if LG_LOG_SIGNALS.search(line)]
     if any(LG_CAPTURE_FAILED.search(line) for line in log):
         return lines, False
@@ -1343,7 +1370,36 @@ def guest_setup(a, name: str) -> int:
         return 1
     say(f"VDD ekranı: {monitor.get('Status')} {monitor.get('FriendlyName')}")
 
-    # 2. Looking Glass host
+    # 2. Looking Glass host -- THE RELEASE IS SETTLED BEFORE THE INSTALLER RUNS.
+    # The two halves must be the same release or the client refuses the shared
+    # memory segment, and that refusal reaches the operator as "no picture",
+    # which is exactly what a handover that did not work looks like. Installing
+    # a host the client will refuse costs a download and buys a green line that
+    # is wrong. An unreadable version is reported, not treated as a mismatch:
+    # on a machine whose client did not come from a package there is nothing to
+    # compare, and refusing there would make the tool unusable off Arch.
+    lg = _core_lg()
+    client, pin = lg.client_release(), lg.read_pin()
+    if pin.release and not pin.coherent:
+        say(f"ADIM DÜŞTÜ -- {lg.PS1.name} pin'i kendi içinde tutarsız: "
+            f"$Version = {pin.release}, $Url = {pin.url or '(yok)'}. "
+            "Kurulacak sürüm ile söylenen sürüm ayrı.")
+        return 1
+    if lg.compare(client.release, pin.release) is False:
+        say(f"ADIM DÜŞTÜ -- Looking Glass sürümleri ayrı: bu makinedeki istemci "
+            f"{client.release}, kurulacak misafir tarafı {pin.release}.")
+        say("  İki yarı aynı release olmak zorunda; ayrıysa istemci paylaşımlı "
+            "belleği reddeder ve arıza 'görüntü hiç gelmiyor' diye görünür.")
+        for line in lg.remedy(client.release, None).splitlines():
+            say(f"  {line}")
+        return 1
+    if client.release and pin.release:
+        say(f"LG sürümü: istemci {client.release} = kurulacak misafir tarafı "
+            f"{pin.release}")
+    else:
+        say(f"LG sürümü: eşleşme doğrulanmadı -- istemci: {client.detail}; "
+            f"pin: {pin.detail}")
+
     if not run_guest_script(name, WINDOWS / "looking-glass.ps1", [], timeout=600):
         return 1
     services = lg_service(name)
@@ -1376,9 +1432,22 @@ def guest_setup(a, name: str) -> int:
                   else "mod yok (hiçbir ekranı sürmüyor)")
         say(f"  {mode.get('Name')}: {pixels}")
 
-    lines, captures = lg_capture_device(name, gpu)
+    log = lg_host_log(name)
+    lines, captures = lg_capture_device(name, gpu, log=log)
     for line in lines[-10:]:
         print(f"    | {line}")
+
+    # What the guest ended up RUNNING, which is not what the pin said it would
+    # install until the installer has actually run: an install that silently
+    # fell back to an older host would otherwise pass every line above.
+    installed = lg.release_from_log(log or [])
+    if installed and lg.compare(installed, client.release) is False:
+        say(f"  LG sürümü: misafirde {installed}, istemci {client.release} -- "
+            "EŞLEŞMİYOR, istemci paylaşımlı belleği reddedecek")
+    elif installed:
+        say(f"  LG sürümü: misafirde {installed}"
+            + (f" = istemci {client.release}" if client.release else
+               " (istemci tarafı okunamadı)"))
     if captures is None:
         say("  LG yakalama: BİLİNMİYOR -- günlük okunamadı ya da hangi "
             "bağdaştırıcıyı seçtiğini yazmıyor")
@@ -1558,12 +1627,35 @@ def cmd_build(a):
 
 
 def cmd_status(a):
+    """Where the guest is now -- and, when it can be asked, which Looking Glass.
+
+    THE VERSION PAIR IS HERE BECAUSE THIS IS WHERE "no picture" IS DIAGNOSED.
+    A client upgraded past the host in the guest produces a black window and no
+    error anywhere else in the stack; without this line the next step is taking
+    the working parts apart. It is only asked of a running guest, since the
+    reading comes from the host application's own log.
+    """
     print(f"domain : {a.name} -> {domain_state(a.name)}")
     if domain_exists(a.name):
-        print(f"ajan   : {'yanıt veriyor' if agent_ping(a.name) else 'yok'}")
+        alive = agent_ping(a.name)
+        print(f"ajan   : {'yanıt veriyor' if alive else 'yok'}")
         r = virsh("domifaddr", a.name, "--source", "agent", check=False)
         if r.returncode == 0 and r.stdout.strip():
             print(r.stdout.strip())
+
+        lg = _core_lg()
+        client = lg.client_release()
+        installed = lg.release_from_log(lg_host_log(a.name) or []) if alive else None
+        agrees = lg.compare(installed, client.release)
+        print(f"LG     : istemci {client.release or '?'} | misafir "
+              f"{installed or '?'}"
+              + ("  -- EŞLEŞMİYOR" if agrees is False else
+                 "  (eşleşiyor)" if agrees else "  (karşılaştırılamadı)"))
+        if agrees is False:
+            for line in lg.remedy(client.release, installed).splitlines():
+                print(f"         {line}")
+        elif agrees is None and client.release is None:
+            print(f"         {client.detail}")
     workdir = IMAGES / f"{a.name}-unattend"
     if workdir.exists():
         print(f"çalışma: {workdir}")

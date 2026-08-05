@@ -189,6 +189,18 @@ bilir, ve yanlış ad "LG bağlanıyor ama hiç kare gelmiyor" olarak görünür
 sonunda bu iddia da ölçülür: Looking Glass host'un kendi günlüğünden **hangi
 bağdaştırıcıda yakaladığı** okunur, ve VDD'ye verilenle uyuşmuyorsa tur düşer.
 
+**Looking Glass'ın iki yarısı aynı release olmak zorunda** — ayrıysa istemci
+paylaşımlı belleği reddeder ve arıza "görüntü hiç gelmiyor" diye görünür, yani
+çalışmayan bir devirden ayırt edilemez. Bu yüzden sürüm üç yerden okunur, hiçbiri
+elle yazılmaz: ana makinede **kurulu istemcinin** sürümü (PATH'teki ikili
+çözülür, sahibi pakete sorulur), depoda `guest/windows/looking-glass.ps1`'in
+pin'i (`$Version`/`$Url`/`$Sha256` — üçü birlikte), ve misafirde **koşan** host
+uygulamasının kendi günlüğü. `doctor` ilk ikisini karşılaştırır (misafir
+gerekmez; yumuşak uyarı — devri değil görüntüyü engelleyen bir fark), `setup`
+uyuşmazlıkta LG adımını **hiç koşmaz** ve indirme adresini istemcinin sürümünden
+türetip basar, `status` misafirdekiyle istemcidekini yan yana yazar. Sürümü
+okunamayan bir makinede cevap "bilinmiyor"dur ve uyuşmazlık sayılmaz.
+
 **Kart domain'e ayrı bir adımda girer (`passthrough`).** Kartsız domain,
 masaüstü canlıyken istenildiği kadar sürülebilir — hata ayıklama turu kimseden
 bir şey götürmez. Kart girdiği anda tur bir **devir** turu olur: `setup --start`

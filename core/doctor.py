@@ -35,7 +35,7 @@ import os
 import sys
 from dataclasses import dataclass
 
-from . import hostfiles, probe, session
+from . import hostfiles, lookingglass, probe, session
 from .profile import Profile
 
 HARD, SOFT = "sert", "yumuşak"
@@ -212,8 +212,50 @@ def _checks_without_profile(machine: probe.Machine) -> list[Check]:
     return checks
 
 
+def _check_lg_release() -> Check:
+    """Do the two Looking Glass halves name the same release?
+
+    SOFT, AND NEVER BEHIND THE GATE. A version mismatch does not stop the
+    handover -- the card moves, the guest boots, everything install() writes is
+    correct. What it stops is the picture, and it stops it in the shape of a
+    broken passthrough: the client attaches and no frames arrive. That is the
+    reason this line exists at all, since a failure that looks like the tool's
+    own would otherwise be diagnosed by taking the working parts apart.
+
+    IT ASKS THE QUESTION WITHOUT A GUEST. The pin is what `setup` would install,
+    so the answer is available on a machine where no domain has ever been
+    defined -- which is where a client upgrade lands. What the guest actually
+    carries is a different reading, and it belongs where a guest is reachable
+    (guest/build.py); doctor writes nothing and starts nothing.
+    """
+    client = lookingglass.client_release()
+    pin = lookingglass.read_pin()
+
+    if pin.release and not pin.coherent:
+        return Check(
+            "lg-surum", SOFT, False, "Looking Glass sürümleri eşleşiyor",
+            f"pin kendi içinde tutarsız — $Version = {pin.release}, "
+            f"$Url = {pin.url or '(yok)'}",
+            remedy=f"{lookingglass.PS1.name}: $Version, $Url ve $Sha256 aynı "
+                   "sürümü göstermeli.",
+        )
+
+    ok = lookingglass.compare(client.release, pin.release)
+    detail = f"istemci: {client.detail} | misafir pin'i: {pin.detail}"
+    return Check(
+        "lg-surum", SOFT, ok, "Looking Glass sürümleri eşleşiyor",
+        detail,
+        remedy="" if ok is not False else lookingglass.remedy(client.release, None),
+    )
+
+
 def run_checks(machine: probe.Machine, p: Profile | None) -> list[Check]:
-    return _checks_with_profile(machine, p) if p else _checks_without_profile(machine)
+    checks = (_checks_with_profile(machine, p) if p
+              else _checks_without_profile(machine))
+    # Appended rather than folded into either list: it is a question about two
+    # pieces of software agreeing, not about what this machine is, and gate()
+    # deliberately never sees it.
+    return checks + [_check_lg_release()]
 
 
 # --------------------------------------------------------------------------- #
@@ -447,6 +489,12 @@ def report(profile_name: str | None = None) -> int:
         print(f"{len(warnings)} yumuşak uyarı var; engel değil:")
         for c in warnings:
             print(f"  - {c.title}: {c.detail}")
+            # The remedy is printed here as well as on the blocking path: a
+            # soft failure the reader cannot act on is a soft failure the
+            # reader learns to scroll past.
+            if c.remedy:
+                for line in c.remedy.splitlines():
+                    print(f"    {line}")
     if p.notes:
         print()
         print(p.notes)

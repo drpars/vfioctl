@@ -3,9 +3,16 @@
 
     THE VERSION MUST MATCH THE HOST'S CLIENT (K2). The client here is the AUR
     package looking-glass B7-7, so the guest gets the B7 host binary. A mismatch
-    does not degrade gracefully: the client refuses the shared memory segment.
-    Check the host side with `looking-glass-client --version` before changing
-    $Version.
+    does not degrade gracefully: the client refuses the shared memory segment,
+    and the operator sees a black window rather than an error.
+
+    THIS IS NOW CHECKED ON THE HOST, AND $Version BELOW IS WHAT IT READS.
+    core/lookingglass.py parses that line out of this file and compares it with
+    the release of the installed client; `vfioctl doctor` reports the pair and
+    `build.py setup` refuses to run this script when the two differ. So the
+    three parameters move TOGETHER and stay in the shape below -- $Sha256 is
+    only valid for one release, and a $Version that disagrees with $Url would
+    make every reading downstream wrong about what the guest is carrying.
 
     Since B6 the Windows installer CARRIES THE IVSHMEM DRIVER -- there is no
     separate download, and the old "grab virtio-win-08032022.zip" instruction
