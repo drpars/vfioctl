@@ -26,7 +26,9 @@
   unattended run to end in a reset nobody watched.
 
   BOTH DOMAINS MUST NEVER RUN AT ONCE once the hostdev pair does get added —
-  one card. Today they can, because this one does not claim it.
+  one card. Today they can, because this one does not claim it. build.py refuses
+  the clash itself (guard_single_card) rather than leaving it to libvirt, whose
+  refusal to start says nothing about which guest is holding what.
 -->
 <domain type='kvm'>
   <name>@@NAME@@</name>
@@ -34,6 +36,18 @@
     <libosinfo:libosinfo xmlns:libosinfo="http://libosinfo.org/xmlns/libvirt/domain/1.0">
       <libosinfo:os id="http://microsoft.com/win/11"/>
     </libosinfo:libosinfo>
+    <!--
+      THE MARK THAT MAKES THE DESTRUCTIVE PATH SAFE, and it belongs here rather
+      than in a step that runs afterwards: a domain that exists for even a
+      moment without it is a domain `clean` would refuse to remove. libvirt
+      keeps a custom namespace through define verbatim (measured), and drops it
+      when the domain is redefined from a file that does not carry it — which is
+      the behaviour wanted, since an XML we did not write is not ours to
+      destroy. Read back by build.py's marker_of().
+    -->
+    <vfioctl:vfioctl xmlns:vfioctl="https://github.com/drpars/vfioctl">
+      <vfioctl:built-by role="test-guest"/>
+    </vfioctl:vfioctl>
   </metadata>
   <memory unit='KiB'>@@MEMORY_KIB@@</memory>
   <currentMemory unit='KiB'>@@MEMORY_KIB@@</currentMemory>

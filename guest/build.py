@@ -24,9 +24,11 @@ guest-ping, then sets autologon, reboots, and only calls the round finished
 when guest-get-users names the account. A successful `reg add` is a claim; a
 user in that list is the evidence.
 
-IT NEVER TOUCHES win11. The working guest is refused by name and by disk path,
-in both directions, because the destructive half of this script (wipe the disk,
-undefine, delete the nvram) is exactly what must never be pointed at it.
+IT ONLY TOUCHES GUESTS IT BUILT. The destructive half of this script -- wipe
+the disk, undefine, delete the nvram -- runs against a domain only when that
+domain carries the mark `build` wrote into it, and against an image only when
+no other domain has it attached. An unrecognised guest is protected rather than
+named, so the rule holds on a machine whose working guest is not called win11.
 
 NOTHING PERSONAL REACHES THE REPOSITORY. The account name, the password, the
 locale and the ISO path are asked at run time or passed as flags; the rendered
@@ -60,9 +62,30 @@ TEMPLATES = HERE / "templates"
 IMAGES = Path.home() / ".images"
 URI = "qemu:///system"
 
-# The guest that works. Refused as a target, whichever way it is spelled.
-PROTECTED_DOMAINS = {"win11"}
-PROTECTED_DISKS = {IMAGES / "win11.qcow2"}
+# OWNERSHIP, AND WHY IT IS NOT A LIST OF NAMES. The destructive half of this
+# script used to be gated by a blacklist -- PROTECTED_DOMAINS = {"win11"} and the
+# matching disk path. A blacklist protects the machine it was written on and
+# nothing else: on a second laptop the working guest is called something else,
+# `clean` does not recognise it, and destroy -> undefine --nvram -> delete the
+# disk runs to the end. A gate that never fires looks exactly like a gate that
+# was passed. K13's profile gate does not catch it either -- that one asks about
+# hardware, and the same model of laptop matches.
+#
+# So the question is not "which names are forbidden" but "did we build this
+# domain", and the answer is a mark this script writes into the domain's
+# <metadata> at define time. An unrecognised domain is protected: the whitelist
+# falls on the closed side.
+#
+# MEASURED 2026-08-05 against libvirt 12.6.0:
+#   * a custom namespace under <metadata> survives `define` verbatim, the same
+#     way libosinfo's block does;
+#   * `virsh metadata --uri` reads it back with the prefix stripped;
+#   * ABSENT METADATA IS NOT AN ERROR -- rc is 0 with empty stdout, so a check
+#     on the exit code alone would call every unmarked domain ours. That is why
+#     marker_of() looks at the text and not at the return code;
+#   * `define` REPLACES the stored XML rather than merging into it, so a domain
+#     redefined from somebody else's file loses the mark and falls closed.
+MARKER_NS = "https://github.com/drpars/vfioctl"
 
 DEFAULT_VIRTIO_ISO = Path("/var/lib/libvirt/images/virtio-win.iso")
 
@@ -102,12 +125,117 @@ def die(msg, code=1):
 # guards
 # --------------------------------------------------------------------------- #
 
+def marker_of(name: str) -> str | None:
+    """Our mark on a defined domain, or None when it does not carry one.
+
+    The text is what decides, not the exit code: virsh answers rc=0 with an
+    empty body for a domain that has no metadata in this namespace, so
+    `returncode == 0` would report every guest on the machine as ours.
+    """
+    r = virsh("metadata", name, "--uri", MARKER_NS, check=False)
+    if r.returncode != 0:
+        return None
+    text = r.stdout.strip()
+    return text or None
+
+
+def domain_disks(name: str) -> set[Path]:
+    """Every image file the domain has attached, resolved."""
+    r = virsh("dumpxml", name, check=False)
+    if r.returncode != 0:
+        return set()
+    try:
+        root = ElementTree.fromstring(r.stdout)
+    except ElementTree.ParseError:
+        return set()
+    paths = set()
+    for source in root.findall("./devices/disk/source"):
+        raw = source.get("file") or source.get("dev")
+        if raw:
+            paths.add(Path(raw).resolve())
+    return paths
+
+
+def defined_domains() -> list[str]:
+    r = virsh("list", "--all", "--name", check=False)
+    return [n for n in r.stdout.split() if n] if r.returncode == 0 else []
+
+
+def disk_claimants(disk: Path, exclude: str) -> list[str]:
+    """Domains other than `exclude` that have this image attached."""
+    target = disk.resolve()
+    return [d for d in defined_domains()
+            if d != exclude and target in domain_disks(d)]
+
+
 def guard(name: str, disk: Path):
-    """Refuse anything aimed at the working guest, by name or by disk."""
-    if name in PROTECTED_DOMAINS:
-        die(f"'{name}' korunan domain -- bu betik ona dokunmaz.")
-    if disk.resolve() in {p.resolve() for p in PROTECTED_DISKS if p.exists()}:
-        die(f"'{disk}' korunan disk imajı -- bu betik ona dokunmaz.")
+    """Refuse a destructive run unless we can show the target is ours.
+
+    Two closed sides, and each catches what the other cannot. The mark answers
+    for the domain: a defined guest without it is somebody else's, whatever it
+    is called. The claim check answers for the image: a --disk pointing at a
+    file some other domain has attached is refused whatever --name says, which
+    is the case a name-based rule could never see.
+
+    What is deliberately allowed: an unclaimed image at a path nobody else
+    references, with no domain defined for it. That is a half-finished round --
+    build creates the disk before it defines the domain -- and refusing it would
+    leave `clean` unable to finish the job it exists for.
+    """
+    if domain_exists(name) and marker_of(name) is None:
+        die(f"'{name}' bu betiğin ürettiği bir domain değil (işaret yok) -- "
+            f"yıkıcı hiçbir adım ona uygulanmaz.")
+    claimants = disk_claimants(disk, exclude=name)
+    if claimants:
+        die(f"'{disk}' başka bir domain'in diski ({', '.join(claimants)}) -- "
+            f"bu betik ona dokunmaz.")
+
+
+def guard_single_card(name: str):
+    """Refuse to start a passthrough guest while another one holds the card.
+
+    There is one dGPU, so two domains claiming it cannot run at once. Leaving
+    that to libvirt means the operator reads "VM failed to start" and has to
+    work out for themselves whether the cause was the card, the hook or the
+    domain -- and this is the round where a second passthrough domain exists on
+    this machine for the first time.
+    """
+    ours = domain_hostdevs(name)
+    if not ours:
+        return
+    for other in defined_domains():
+        if other == name or domain_state(other) != "running":
+            continue
+        clash = ours & domain_hostdevs(other)
+        if clash:
+            die(f"'{other}' çalışıyor ve aynı PCI cihazını istiyor "
+                f"({', '.join(sorted(clash))}) -- tek kart var, önce onu kapat.")
+
+
+def domain_hostdevs(name: str) -> set[str]:
+    """PCI addresses the domain passes through, as 0000:01:00.0 strings."""
+    r = virsh("dumpxml", name, check=False)
+    if r.returncode != 0:
+        return set()
+    try:
+        root = ElementTree.fromstring(r.stdout)
+    except ElementTree.ParseError:
+        return set()
+    addrs = set()
+    for hostdev in root.findall("./devices/hostdev[@type='pci']"):
+        addr = hostdev.find("./source/address")
+        if addr is None:
+            continue
+        try:
+            addrs.add("{:04x}:{:02x}:{:02x}.{}".format(
+                int(addr.get("domain", "0x0"), 16),
+                int(addr.get("bus", "0x0"), 16),
+                int(addr.get("slot", "0x0"), 16),
+                int(addr.get("function", "0x0"), 16),
+            ))
+        except ValueError:
+            continue
+    return addrs
 
 
 def domain_exists(name: str) -> bool:
@@ -500,6 +628,7 @@ def cmd_build(a):
     say(f"domain tanımlandı: {a.name}")
 
     # 5. run it
+    guard_single_card(a.name)
     virsh("start", a.name, capture=False)
     press_enter_past_the_cd_prompt(a.name, a.enter_seconds)
 
