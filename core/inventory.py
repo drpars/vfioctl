@@ -1,12 +1,15 @@
 """`vfioctl inventory` -- what else on this machine could go to a guest, and
 what handing it over would cost the host.
 
-IT REPORTS AND NEVER APPLIES (K14). v1 hands over the GPU and nothing else;
-this module answers the question that comes before any second device, which is
-not "can it be done" but "what does the host lose". Those are different
-questions and only the second one has an answer worth writing down: every
-device here is technically detachable, and roughly half of them would take the
-running desktop with them.
+IT REPORTS AND NEVER APPLIES (K14). The question it answers is not "can it be
+done" but "what does the host lose". Those are different questions and only the
+second one has an answer worth writing down: every device here is technically
+detachable, and roughly half of them would take the running desktop with them.
+
+IT IS ALSO THE POLICY OWNER FOR THE ONE COMMAND THAT DOES APPLY. `guest usb`
+lends a USB device to a running guest, and it does not carry a verdict table of
+its own -- it asks usb_verdict() here. Two tables would drift, and the one that
+drifted would be the one nobody reads until it lets something through.
 
 WHY IT IS NOT PART OF doctor. doctor answers one question -- may this tool
 write on this machine -- and its verdict is the last line of its output. An
@@ -25,12 +28,14 @@ answer: the Bluetooth radio and the laptop's built-in keyboard sit on the same
 xHCI, so handing over the radio is cheap and handing over its controller costs
 the keyboard.
 
-REFUSALS ARE ABOUT DATA AND ABOUT THE SCREEN, WARNINGS ARE ABOUT CONVENIENCE.
+REFUSALS ARE ABOUT DATA, ABOUT THE SCREEN, AND ABOUT BEING ABLE TO UNDO THIS.
 A disk the host has mounted, has in fstab, or swaps onto is refused outright --
 that is K14's hard protection, written before anything can hand a disk over,
-so the day it exists it is already guarded. A lost keyboard or a lost radio is
-recoverable by shutting the guest down; it is said loudly and it does not
-refuse.
+so the day it exists it is already guarded. The card carrying the host's screen
+is refused for the same reason. A lost keyboard or a lost radio is recoverable
+by shutting the guest down, so it warns rather than refuses -- but shutting a
+guest down takes an input device, so the last one the host has is refused too.
+Everything else is said loudly and allowed.
 """
 
 from __future__ import annotations
@@ -399,29 +404,79 @@ def _input_kinds(device: probe.UsbDevice) -> list[str]:
     return list(dict.fromkeys(kinds))
 
 
-def usb_items(devices: list[probe.UsbDevice]) -> list[Item]:
+def _host_keeps(usb_name: str, inputs: list[probe.InputDevice]) -> tuple[bool, bool, str]:
+    """What the host would still be driven by if this USB device left.
+
+    Returns (a keyboard stays, a pointer stays, one name per kind). The
+    question is asked of every bus, because the answer usually lives off USB
+    entirely -- see probe.input_devices().
+
+    ONE NAME PER KIND, NOT THE ROLL CALL. A single wireless mouse registers
+    five input nodes, so listing everything that stays turned a two-word answer
+    into six names and buried the part that decides the verdict. The one named
+    is preferably not on USB at all, since that is the one that cannot be lent
+    away by the next invocation either.
+    """
+    staying = [i for i in inputs if i.usb_device != usb_name and i.usable]
+
+    def pick(kind: str) -> str | None:
+        matching = [i for i in staying if getattr(i, kind)]
+        if not matching:
+            return None
+        return min(matching, key=lambda i: (i.usb_device is not None, i.name)).name
+
+    keyboard, pointer = pick("keyboard"), pick("pointer")
+    labels = [f"{label} ({name})" for label, name
+              in (("klavye", keyboard), ("işaretçi", pointer)) if name]
+    return keyboard is not None, pointer is not None, ", ".join(labels)
+
+
+def usb_verdict(device: probe.UsbDevice, devices: list[probe.UsbDevice],
+                inputs: list[probe.InputDevice]) -> tuple[str, list[str]]:
+    """Whether this USB device may be lent to a guest, and what it costs.
+
+    THE ONE REFUSAL IS ABOUT BEING ABLE TO TAKE IT BACK. Everything else here
+    is recoverable by shutting the guest down, and shutting a guest down needs
+    a keyboard or a pointer. A machine whose only keyboard and only mouse are
+    both USB can therefore hand over exactly one of them; handing over the
+    second leaves nothing to type the command that undoes it. On this laptop
+    the rule stays quiet -- the touchpad is I2C and never leaves -- and that is
+    the point of counting what stays rather than what goes.
+    """
+    reasons: list[str] = []
+    verdict = CANDIDATE
     bluetooth = [d for d in devices if "btusb" in d.drivers]
 
+    if "usbhid" in device.drivers:
+        verdict = WARN
+        # One HID device registers several input nodes (a mouse announces a
+        # keyboard, a consumer-control and a mouse), and printing all of
+        # them repeats the device's own name five times. What the reader
+        # needs is what kind of input it is, so the names are reduced to
+        # their distinguishing tail.
+        kinds = _input_kinds(device)
+        label = ", ".join(kinds) if kinds else "girdi aygıtı"
+        reasons.append(f"host'un girdi aygıtı ({label}) — devredilirse "
+                       "misafire geçer, host'ta çalışmaz")
+        keyboard, pointer, staying = _host_keeps(device.name, inputs)
+        if keyboard or pointer:
+            reasons.append(f"host'ta kalan girdi: {staying}")
+        else:
+            verdict = REFUSE
+            reasons.append("host'ta başka girdi aygıtı kalmıyor — devri geri "
+                           "alacak komutu yazacak klavye ya da fare kalmaz")
+    if "btusb" in device.drivers and len(bluetooth) == 1:
+        reasons.append("makinedeki tek Bluetooth — misafir koşarken host "
+                       "Bluetooth'unu kaybeder")
+    return verdict, reasons
+
+
+def usb_items(devices: list[probe.UsbDevice],
+              inputs: list[probe.InputDevice] | None = None) -> list[Item]:
+    inputs = probe.input_devices() if inputs is None else inputs
     items: list[Item] = []
     for device in devices:
-        reasons: list[str] = []
-        verdict = CANDIDATE
-
-        if "usbhid" in device.drivers:
-            verdict = WARN
-            # One HID device registers several input nodes (a mouse announces a
-            # keyboard, a consumer-control and a mouse), and printing all of
-            # them repeats the device's own name five times. What the reader
-            # needs is what kind of input it is, so the names are reduced to
-            # their distinguishing tail.
-            kinds = _input_kinds(device)
-            label = ", ".join(kinds) if kinds else "girdi aygıtı"
-            reasons.append(f"host'un girdi aygıtı ({label}) — devredilirse "
-                           "misafire geçer, host'ta çalışmaz")
-        if "btusb" in device.drivers and len(bluetooth) == 1:
-            reasons.append("makinedeki tek Bluetooth — misafir koşarken host "
-                           "Bluetooth'unu kaybeder")
-
+        verdict, reasons = usb_verdict(device, devices, inputs)
         items.append(Item(
             bus="usb", ident=device.name, ids=device.ids,
             title=_usb_title(device),

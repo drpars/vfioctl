@@ -23,6 +23,12 @@ vendor:product, with libvirt doing the detaching. Inventory needs both, and
 the difference between them is the difference between handing over a
 controller and handing over one thing plugged into it -- on this machine the
 Bluetooth radio and the laptop's own keyboard sit on the same controller.
+
+INPUT DEVICES ARE READ ACROSS ALL BUSES, NOT JUST USB. Lending a USB keyboard
+to a running guest is only safe while something is left to drive the host with,
+and that something is usually not on USB at all: here it is an I2C touchpad and
+an i8042 keyboard. The one refusal built on this needs the whole picture or it
+answers the wrong question in both directions.
 """
 
 from __future__ import annotations
@@ -208,6 +214,98 @@ def _int(value: str | None) -> int | None:
         return int(value) if value is not None else None
     except ValueError:
         return None
+
+
+USB_DEVICE_NAME = re.compile(r"^\d+-\d+(\.\d+)*$")
+
+
+@dataclass
+class InputDevice:
+    """One /sys/class/input node, and whether the host could still be driven
+    without it."""
+    node: str                # input17
+    name: str                # ASUE120A:00 04F3:319B Touchpad
+    usb_device: str | None   # 1-3 when it hangs off a USB device, else None
+    keyboard: bool
+    pointer: bool
+
+    @property
+    def usable(self) -> bool:
+        return self.keyboard or self.pointer
+
+
+def _bitmask(path: Path) -> set[int]:
+    """The set bits of a sysfs capability bitmap.
+
+    The file is words of `unsigned long` printed most significant first, so it
+    is read right to left. Anything unreadable is an empty set rather than an
+    error: a capability the kernel does not export must not be able to make the
+    host look input-less, since the one refusal built on this would then fire
+    on a machine that is perfectly drivable.
+    """
+    text = _read(path)
+    if not text:
+        return set()
+    out: set[int] = set()
+    for index, word in enumerate(reversed(text.split())):
+        try:
+            value = int(word, 16)
+        except ValueError:
+            return out
+        for bit in range(value.bit_length()):
+            if value >> bit & 1:
+                out.add(index * 64 + bit)
+    return out
+
+
+# udev's own test (input_id builtin): a node is a keyboard when it carries all
+# of ESC..S, i.e. every key in the first word except KEY_RESERVED. Copied
+# rather than invented, and copied rather than asked of udevadm, because the
+# lid switch, the power button and the WMI hotkey node all announce EV_KEY --
+# counting those as keyboards would say the host still has one after its only
+# keyboard left. Measured on this machine: the test separates all three.
+KEYBOARD_KEYS = frozenset(range(1, 32))
+BTN_LEFT, BTN_TOUCH = 0x110, 0x14a
+REL_XY, ABS_XY = frozenset((0, 1)), frozenset((0, 1))
+
+
+def input_devices() -> list[InputDevice]:
+    """Every input node the host has, USB and otherwise.
+
+    THE NON-USB ONES ARE THE POINT. Whether handing a USB keyboard to a guest
+    leaves the host unusable cannot be answered by looking at USB alone: this
+    laptop's touchpad is on I2C and its legacy keyboard on i8042, so both stay
+    no matter what leaves over USB. Counting only USB devices would refuse a
+    handover that costs nothing here, and counting nothing at all would allow
+    one that strands a desktop whose keyboard and mouse are its only inputs.
+    """
+    out: list[InputDevice] = []
+    root = Path("/sys/class/input")
+    if not root.is_dir():
+        return out
+    for node in sorted(root.glob("input[0-9]*")):
+        name = _read(node / "name")
+        if name is None:
+            continue
+        keys = _bitmask(node / "capabilities" / "key")
+        rel = _bitmask(node / "capabilities" / "rel")
+        absolute = _bitmask(node / "capabilities" / "abs")
+        # The deepest USB component of the path is the device libvirt would
+        # move; a node behind a hub sits under both 1-3 and 1-3.2, and it is
+        # 1-3.2 that has the vendor:product an attach names.
+        usb = None
+        for part in os.path.realpath(node).split("/"):
+            if USB_DEVICE_NAME.match(part):
+                usb = part
+        out.append(InputDevice(
+            node=node.name,
+            name=name,
+            usb_device=usb,
+            keyboard=KEYBOARD_KEYS <= keys,
+            pointer=(REL_XY <= rel and BTN_LEFT in keys)
+                    or (ABS_XY <= absolute and (BTN_TOUCH in keys or BTN_LEFT in keys)),
+        ))
+    return out
 
 
 def usb_devices() -> list[UsbDevice]:

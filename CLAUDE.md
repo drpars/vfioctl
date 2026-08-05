@@ -45,6 +45,15 @@ bir alt komudun onu kazara atlayamaması.
   çözmez, probe etmez; `install` dosya yazar, `selftest` misafir başlatıp okur.
   İkinci bir yazar, bu makineyi üç kez kilitleyen yolun ta kendisi. Bir alt
   komuda "devir" işi eklenecekse önce bu madde tartışılır.
+  - **Maddenin konusu PCI bind yollarıdır; USB hostdev dışındadır** (2026-08-05
+    tartışıldı, `guest usb` yazılmadan önce). Üç ölçüm: hook `type='pci'`
+    süzüyor — yalnız USB taşıyan bir XML'e `no handover` diyor, yani USB satırı
+    kartı taşıyan yolu çağıramıyor; canlı takmada hook zaten hiç koşmuyor
+    (hook'lar domain başlarken/biterken koşar); ve libvirt'in belgesi `managed`
+    özniteliğini **yalnızca PCI** için okuyup USB'yi kendisi ayırdığını
+    söylüyor. Yani USB'de "ikinci yazar" olan araç değil libvirt, ve ayırdığı
+    şey `btusb`'nin sıradan bir disconnect'i — nvidia yığınının `R` durumunda
+    kilitlenen yolu değil.
 - **Paket kurulmaz.** Eksik paket ölçülür ve komutu basılır. Kurmak, bir AUR
   yardımcısının disiplinini (özellikle: asla `--noconfirm`, PKGBUILD diff'i
   okunur) burada yeniden üretmek demek olurdu.

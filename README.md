@@ -110,8 +110,9 @@ ekranını taşıyacak ikinci bir GPU bulunması.
 ./vfioctl inventory       # PCI + USB, her cihazın host'a bedeliyle
 ```
 
-**Yalnızca rapordur: v1 GPU'dan başka hiçbir cihazı devretmez.** Cevapladığı
-soru "yapılabilir mi" değil — neredeyse her cihaz teknik olarak ayrılabilir —
+**Yalnızca rapordur, hiçbir şey uygulamaz** — uygulayan tek komut aşağıdaki
+`guest usb` ve o da hükmü buradan sorar. Cevapladığı soru "yapılabilir mi"
+değil — neredeyse her cihaz teknik olarak ayrılabilir —
 **"host ne kaybeder"**. `doctor`'dan ayrı bir komut olması bilerek: `doctor`'ın
 tek bir hükmü var ve otuz satırlık bir döküm onu gömer, üstelik envanter tam da
 kapı **kapalıyken** okunmaya değer, çünkü listelediği şey sebebidir.
@@ -124,10 +125,47 @@ cihaz değil: bu makinede Bluetooth radyosu ile dizüstünün kendi klavyesi ayn
 xHCI'da duruyor, yani radyoyu devretmek ucuz, denetleyicisini devretmek klavye
 demek.
 
-Ret ile uyarı ayrımı sabit: **ret veriye ve ekrana dairdir** — host'un bağlı
-olduğu, `fstab`'ında duran ya da takas aldığı bir disk, ve host'un ekranını
-taşıyan kart. Kaybolan bir klavye ya da radyo misafiri kapatınca geri gelir;
-yüksek sesle söylenir, reddedilmez.
+Ret ile uyarı ayrımı sabit: **ret veriye, ekrana ve geri alabilmeye dairdir** —
+host'un bağlı olduğu, `fstab`'ında duran ya da takas aldığı bir disk; host'un
+ekranını taşıyan kart; ve host'un **son** girdi aygıtı. Kaybolan bir klavye ya
+da radyo misafiri kapatınca geri gelir, ama misafiri kapatmak da bir girdi
+aygıtı ister — o yüzden sonuncusu reddedilir, geri kalanı yüksek sesle söylenip
+geçilir.
+
+### Koşan misafire USB aygıtı ödünç vermek
+
+```sh
+./vfioctl guest --name win11 usb                        # kimde ne var
+./vfioctl guest --name win11 usb --attach 8087:0032     # ödünç ver
+./vfioctl guest --name win11 usb --detach 8087:0032     # geri al
+```
+
+Kart misafire geçtikten **sonra**, misafir koşarken bir USB aygıtını (Bluetooth
+radyosu, oyun kolu, bellek, fare alıcısı) o oturuma ödünç verir.
+
+**Kalıcı hiçbir şey yazılmaz.** Yalnızca `--live`, asla `--config`: domain'in
+saklı tanımı hiç değişmez, ödünç verilen aygıt misafir kapanınca libvirt
+tarafından host'a geri verilir. Yani **misafiri kapatmak her zaman tam bir geri
+alma**dır; girdi aygıtı kuralının tek başına yetmesini sağlayan da bu.
+
+**Devir hook'u bu yola hiç karışmaz.** Hook `type='pci'` süzer, USB hostdev'i
+hiç görmez (ölçüldü: yalnız USB taşıyan bir XML'e `no handover` diyor); zaten
+hook'lar domain başlarken koşar, canlı takmada koşmazlar. Kartı taşıyan tek
+yazarın hook olduğu ilkesi bu komutla bozulmuyor — burada ayırmayı libvirt'in
+kendisi yapıyor, ve belgesi bunu USB için zaten üstleniyor (`managed`
+özniteliği **yalnızca PCI** için okunur).
+
+**Neden `passthrough`'un bir bayrağı değil:** `passthrough` **kapalı** bir
+domain'in saklı tanımını düzenler ve kartı başlangıçta hook taşır; bu komut
+**koşan** bir misafire takar ve hiçbir iz bırakmaz. Tek komutta toplamak, bir
+bayrağın "domain kapalı olmalı" ile "domain koşuyor olmalı" arasında karar
+vermesi demek olurdu.
+
+Kanıt iddia değil ölçümdür: komut takmadan önce ve sonra **host tarafındaki
+sürücüleri** okur (`btusb` gitti mi), domain'in canlı XML'ini okur, ve ajan
+varsa **misafirin kendi aygıt envanterini** sorar (`Get-PnpDevice`). Aynı
+`vendor:product`'tan iki tane takılıysa devir yapılmaz — libvirt hangisini
+alacağını ayırt edemez.
 
 ### Host kurulumu
 
@@ -265,7 +303,14 @@ olduğu — koddan değerli; oralar okunmadan değiştirilmemeli.
 | 1 | kapı: donanım profili biçimi, `doctor`, seans yarısının ölçümü ✅ |
 | 2 | host kurulumu: devir hook'u, udev kuralları, Looking Glass host yarısı ✅ |
 | 3 | misafir inşasının kalan yarısı: misafir betiklerini süren kod ✅ |
-| 4 | envanter, ek cihaz devri (Bluetooth, ikinci NVMe) ← **buradayız** |
+| 4 | envanter ✅, oturuma bağlı USB devri ✅, disk devri ← **buradayız** |
+
+Faz 4'ün iki yarısı birbirinin küçük kardeşi değil, ayrı iki mekanizma.
+**Oturuma bağlı USB devri** koşan misafire ödünç verir, hiçbir yere yazmaz,
+misafir kapanınca geri alınır. **Disk devri** ise kurulum zamanına ve kalıcı
+tanıma ait — misafir oraya kurulabilir — ve K14'ün sert korumasının muhatabı o.
+İkincisi bu makinede ancak ikinci bir NVMe takıldığında yazılabilir; reddetme
+yolu bugün envanterde yazılı ve ölçülü.
 
 Faz 3'ün kabul ölçütü bu makinede karşılandı: kartsız prova ve kartlı tur geçti
 (LG host günlüğü kartı adıyla yazıp `Capture Start` dedi, VDD ekranı 2560x1440),

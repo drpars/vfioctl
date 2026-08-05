@@ -168,6 +168,17 @@ def die(msg, code=1):
     sys.exit(code)
 
 
+def self_cmd(*words: str) -> str:
+    """A copy-pasteable invocation of this tool.
+
+    The guest side is reached as `vfioctl guest ...` and nowhere else since
+    K15, so a hint that prints only the flags prints a command that does not
+    run. Six of them did, left over from the rename; going through one place
+    means the next one cannot.
+    """
+    return " ".join((sys.argv[0], *words))
+
+
 # --------------------------------------------------------------------------- #
 # guards
 # --------------------------------------------------------------------------- #
@@ -553,7 +564,7 @@ def cmd_passthrough(a):
         for addr in addresses:
             say(f"  {addr} şu an host'ta: {host_driver_of(addr)}")
         say("Bundan sonrası düz VT'den koşulur: "
-            f"{sys.argv[0]} --name {a.name} setup --start")
+            + self_cmd("guest", "--name", a.name, "setup", "--start"))
     return 0
 
 
@@ -568,6 +579,331 @@ def _matches(block: str, address: str) -> bool:
     return all(f"{key}='0x{parts[key]:0{width}x}'" in block
                for key, width in (("domain", 4), ("bus", 2),
                                   ("slot", 2), ("function", 1)))
+
+
+# --------------------------------------------------------------------------- #
+# lending a USB device to a running guest
+# --------------------------------------------------------------------------- #
+
+# No `managed` attribute: libvirt's own documentation says it is read for
+# type='pci' and ignored everywhere else. USB devices "are detached from the
+# host on guest startup and reattached after the guest exits", and that is the
+# whole mechanism -- there is no vfio-pci to bind, no IOMMU group to move, and
+# nothing for the handover hook to do. Measured: a domain XML carrying only a
+# USB hostdev makes the hook report "no handover", because it filters on
+# type='pci'.
+USB_HOSTDEV_XML = """<hostdev mode='subsystem' type='usb'>
+  <source>
+    <vendor id='0x{vendor}'/>
+    <product id='0x{product}'/>
+  </source>
+</hostdev>
+"""
+
+USB_IDS = re.compile(r"^([0-9a-fA-F]{4}):([0-9a-fA-F]{4})$")
+
+
+def _core_inventory():
+    """core.inventory, imported late and by path like the rest of core.
+
+    It owns the verdict -- may this device be lent, and what does the host lose.
+    A second table here would be a second answer, and the one that drifted
+    would be the one nobody reads until it lets something through.
+    """
+    sys.path.insert(0, str(HERE.parent))
+    from core import inventory
+    return inventory
+
+
+def _core_probe():
+    sys.path.insert(0, str(HERE.parent))
+    from core import probe
+    return probe
+
+
+def domain_usb(name: str) -> list[tuple[str, str]]:
+    """(vendor, product) of every USB device the domain holds right now.
+
+    Read from the live XML rather than remembered, because that is the only
+    record there is: an attach made this way is never written to the persistent
+    definition, so libvirt's running copy is the single source of truth.
+    """
+    r = virsh("dumpxml", name, check=False)
+    if r.returncode != 0:
+        return []
+    try:
+        root = ElementTree.fromstring(r.stdout)
+    except ElementTree.ParseError:
+        return []
+    out = []
+    for hostdev in root.findall("./devices/hostdev[@type='usb']/source"):
+        vendor, product = hostdev.find("vendor"), hostdev.find("product")
+        if vendor is None or product is None:
+            continue
+        out.append((vendor.get("id", "").removeprefix("0x").lower(),
+                    product.get("id", "").removeprefix("0x").lower()))
+    return out
+
+
+def host_drivers_of(usb_name: str) -> list[str]:
+    """Which host drivers hold that USB device's interfaces at this moment.
+
+    THIS IS THE PROOF, AND IT IS READ ON THE HOST SIDE. A successful
+    attach-device is a claim; the device leaving btusb behind is what shows it
+    happened. The device itself stays in sysfs while a guest holds it -- only
+    its interfaces lose their drivers -- so a check for the node's existence
+    would report success either way.
+    """
+    probe = _core_probe()
+    for device in probe.usb_devices():
+        if device.name == usb_name:
+            return device.drivers
+    return []
+
+
+def guest_pnp(name: str, vendor: str, product: str) -> list[dict]:
+    """What the guest itself says it has for that vendor:product.
+
+    The guest's own inventory is the other half of the proof: the host losing a
+    device says it left, not that it arrived. Windows names USB devices by
+    VID/PID in the instance id, which is the one identifier both sides share.
+    """
+    pattern = f"USB\\VID_{vendor.upper()}&PID_{product.upper()}*"
+    return ps_json(name, "Get-PnpDevice | Where-Object { $_.InstanceId -like "
+                   f"{_ps_quote(pattern)} " "} | "
+                   "Select-Object Status,Problem,Class,FriendlyName,InstanceId | "
+                   "ConvertTo-Json -Compress")
+
+
+def cmd_usb(a):
+    """Lend a USB device to a running guest, take it back, or say who has what.
+
+    WHY THIS IS SEPARATE FROM `passthrough`, WHICH ALSO ADDS A hostdev. They
+    differ in every part except the word: passthrough edits a shut-off domain's
+    stored definition so the card is there at the next start, and the card is
+    then moved by the hook at start time. This one attaches to a guest that is
+    already running, writes nothing that survives it, and the handover is
+    libvirt's own -- the hook never sees it. Folding them into one command
+    would mean one flag deciding whether a domain must be running or must not
+    be.
+
+    NOTHING IS PERSISTED, DELIBERATELY. --live only, never --config: a lent
+    device is meant to come back, and a Bluetooth radio silently claimed by a
+    guest at every boot is a fault report six months later that nobody connects
+    to this command. Shutting the guest down is therefore always a complete
+    undo, which is also what makes the input-device rule in core.inventory
+    enough on its own.
+
+    THE OWNERSHIP MARK IS NOT CHECKED HERE, AND THAT IS THE POINT. guard()
+    refuses destructive steps on domains this tool did not build; this step is
+    not destructive, and the guest it exists for is the working one, which
+    predates the mark and does not carry it (measured: `win11` has none). A
+    guard that made the feature refuse its only real target would be protecting
+    nothing.
+    """
+    inventory, probe = _core_inventory(), _core_probe()
+    if not domain_exists(a.name):
+        die(f"'{a.name}' tanımlı değil")
+
+    devices = probe.usb_devices()
+    held = domain_usb(a.name)
+
+    if not (a.attach or a.detach):
+        return _usb_status(a.name, devices, held, inventory, probe)
+
+    ids = a.attach or a.detach
+    m = USB_IDS.match(ids)
+    if not m:
+        die(f"vendor:product bekleniyordu (ör. 8087:0032), gelen: {ids}")
+    vendor, product = m.group(1).lower(), m.group(2).lower()
+
+    state = domain_state(a.name)
+    if state != "running":
+        die(f"'{a.name}' şu an '{state}' -- bu komut koşan bir misafire ödünç "
+            f"verir. Kapalı bir domain'e kalıcı cihaz eklemek bu aracın işi değil.")
+
+    matching = [d for d in devices if (d.vendor, d.product) == (vendor, product)]
+    attached = (vendor, product) in held
+
+    if a.detach:
+        if not attached:
+            die(f"'{a.name}' {vendor}:{product} aygıtını almıyor -- geri "
+                f"alınacak bir şey yok")
+        return _usb_move(a.name, vendor, product, matching, attach=False)
+
+    if attached:
+        say(f"'{a.name}' {vendor}:{product} aygıtını zaten alıyor -- değişiklik yok")
+        return 0
+    if not matching:
+        die(f"host'ta {vendor}:{product} diye bir USB aygıtı yok. "
+            f"Takılı olanlar: {self_cmd('guest', '--name', a.name, 'usb')}")
+    if len(matching) > 1:
+        # vendor:product is what libvirt matches on, so two identical devices
+        # are ambiguous to it as well; it would take one of them and never say
+        # which. Refused rather than guessed, because the wrong one leaving the
+        # host is exactly the surprise this command is supposed to avoid.
+        die(f"host'ta aynı kimliği taşıyan {len(matching)} aygıt var "
+            f"({', '.join(d.name for d in matching)}) -- libvirt hangisini "
+            f"alacağını vendor:product ile ayırt edemez, devir yapılmadı")
+
+    device = matching[0]
+    verdict, reasons = inventory.usb_verdict(device, devices, probe.input_devices())
+    say(f"{device.ids} — {inventory._usb_title(device)} ({device.name})")
+    for reason in reasons:
+        say(f"  {reason}")
+    if verdict == inventory.REFUSE:
+        die("devredilemez -- yukarıdaki gerekçe. (Envanterin tümü: "
+            f"{self_cmd('inventory')})")
+    return _usb_move(a.name, vendor, product, matching, attach=True)
+
+
+# Windows PnP problem codes, only the ones this path actually produces. The
+# number is what the guest reports; the words are what makes it a diagnosis
+# instead of something to search for.
+PNP_PROBLEM = {
+    0: "çalışıyor",
+    10: "başlatılamıyor (Kod 10)",
+    22: "devre dışı bırakılmış (Kod 22)",
+    28: "sürücü kurulu değil (Kod 28)",
+    43: "aygıt sorun bildirdi (Kod 43)",
+}
+
+
+def usb_node_owner(device) -> str | None:
+    """Who owns /dev/bus/usb/BBB/DDD right now.
+
+    THIS IS LIBVIRT'S HALF OF THE PROOF, AND IT IS THE RELIABLE HALF. libvirt
+    chowns the usbfs node to the QEMU user when it lends a device and gives it
+    back to root when it takes it away, so the ownership says whether libvirt
+    did its job even in the cases where nothing else moves. Measured 2026-08-05
+    on the Bluetooth radio: the node changed hands both ways while the host
+    driver never let go once.
+    """
+    if device is None or device.busnum is None or device.devnum is None:
+        return None
+    node = Path(f"/dev/bus/usb/{device.busnum:03d}/{device.devnum:03d}")
+    try:
+        import pwd
+        return pwd.getpwuid(node.stat().st_uid).pw_name
+    except (OSError, KeyError):
+        return None
+
+
+def _usb_move(name: str, vendor: str, product: str,
+              matching: list, attach: bool) -> int:
+    """attach-device / detach-device, then read back both sides.
+
+    WHAT IS AND IS NOT A CRITERION HERE. The first version of this waited for
+    the host driver to disappear and called that success. It is not: measured
+    on this machine's Bluetooth radio, libvirt handed the device over, the
+    guest enumerated it by name, and btusb stayed bound the whole time -- two
+    owners, and the guest stuck at Code 10. So the host driver is now reported
+    as a diagnosis rather than tested as a verdict, and the criteria are the
+    two that answer the question: libvirt's own record (the live XML and the
+    node it chowns) and the guest's own opinion of the device.
+    """
+    device = matching[0] if matching else None
+    usb_name = device.name if device else None
+    before = host_drivers_of(usb_name) if usb_name else []
+
+    xml = USB_HOSTDEV_XML.format(vendor=vendor, product=product)
+    with tempfile.NamedTemporaryFile("w", suffix=".xml", delete=False) as fh:
+        fh.write(xml)
+        tmp = fh.name
+    try:
+        verb = "attach-device" if attach else "detach-device"
+        r = virsh(verb, name, tmp, "--live", check=False)
+        if r.returncode != 0:
+            die(f"libvirt {verb} reddetti: {r.stderr.strip() or r.stdout.strip()}")
+    finally:
+        os.unlink(tmp)
+
+    say(f"libvirt: {'takıldı' if attach else 'geri alındı'} ({vendor}:{product})")
+
+    held = (vendor, product) in domain_usb(name)
+    say(f"  domain'in canlı XML'i: {'alıyor' if held else 'almıyor'}")
+    say(f"  aygıt düğümünün sahibi: {usb_node_owner(device) or '(okunamadı)'}")
+
+    if attach and not held:
+        die("cihaz eklenemedi -- domain XML'inde görünmüyor")
+    if not attach and held:
+        die("cihaz geri alınamadı -- domain hâlâ istiyor")
+
+    if not attach:
+        # Coming back takes a moment: the host has to re-probe the device
+        # before its driver is bound again. Polled rather than slept, and a
+        # driver that never returns is said out loud instead of assumed.
+        deadline = time.time() + 15
+        while time.time() < deadline and not host_drivers_of(usb_name):
+            time.sleep(0.5)
+        after = host_drivers_of(usb_name)
+        say(f"  host tarafı sürücüler: {', '.join(after) or '(yok -- geri gelmedi)'}")
+        return 0
+
+    # The guest needs seconds to enumerate and try to start the device, so the
+    # wait is for it to say something rather than for a fixed interval.
+    deadline = time.time() + 60
+    rows: list[dict] = []
+    while time.time() < deadline:
+        rows = guest_pnp(name, vendor, product)
+        if rows:
+            break
+        time.sleep(2)
+
+    after = host_drivers_of(usb_name)
+    say(f"  host tarafı sürücüler: {', '.join(after) or '(yok -- misafirde)'}"
+        f"{'' if after == before else f' (önce: {", ".join(before) or "(yok)"})'}")
+
+    if not rows:
+        say("  misafirde: aygıt görünmedi ya da ajan cevap vermedi "
+            "-- kanıt alınamadı, iddia edilmiyor")
+        return 0
+
+    started = False
+    for row in rows:
+        problem = row.get("Problem")
+        started = started or (row.get("Status") == "OK" and problem in (0, None))
+        say(f"  misafirde: {row.get('FriendlyName') or '(adsız)'} "
+            f"[{row.get('Class') or '?'}] {row.get('Status')} — "
+            f"{PNP_PROBLEM.get(problem, f'sorun kodu {problem}')}")
+
+    if not started and after:
+        # Both sides holding the same device is the failure this command can
+        # actually diagnose, and it looks like nothing at all from the host.
+        say("  UYARI: aygıt misafirde ama başlamadı ve host sürücüsü de hâlâ "
+            f"bağlı ({', '.join(after)}) -- iki sahip. Host sürücüsü aygıtı "
+            "bırakmadıkça misafir onu başlatamaz.")
+    return 0
+
+
+def _usb_status(name: str, devices: list, held: list, inventory, probe) -> int:
+    """Who has what, and what may still be lent."""
+    state = domain_state(name)
+    print(f"Domain   : {name} ({state})")
+    print(f"Ödünç    : {len(held)} aygıt misafirde")
+    print()
+    inputs = probe.input_devices()
+    for device in devices:
+        verdict, reasons = inventory.usb_verdict(device, devices, inputs)
+        mark, colour = inventory.MARKS[verdict]
+        where = "MİSAFİRDE" if (device.vendor, device.product) in held else "host"
+        print(f"  {inventory._paint(mark, colour)} {device.ids}  {device.name:<6} "
+              f"{where:<10} {inventory._usb_title(device)}")
+        for reason in reasons:
+            print(f"      {reason}")
+    for vendor, product in held:
+        if not any((d.vendor, d.product) == (vendor, product) for d in devices):
+            # A guest can hold a device the host no longer sees -- it was
+            # unplugged while lent. Said out loud, because the domain will keep
+            # asking for it and the next attach of the same ids would collide.
+            print(f"  ? {vendor}:{product}  (host'ta artık yok, misafir hâlâ istiyor)")
+    print()
+    print(f"Ödünç ver : {self_cmd('guest', '--name', name, 'usb')} "
+          f"--attach <vendor:product>")
+    print(f"Geri al   : {self_cmd('guest', '--name', name, 'usb')} "
+          f"--detach <vendor:product>")
+    print("Misafir kapanınca libvirt hepsini kendiliğinden host'a geri verir.")
+    return 0
 
 
 def build_unattend_iso(workdir: Path, unattend_xml: str, out_iso: Path):
@@ -1380,7 +1716,7 @@ def guest_setup(a, name: str) -> int:
 
     if not ensure_console_session(name, workdir):
         die("misafirde konsol oturumu açılamadı -- display-layout ekrana "
-            f"ulaşamaz. Elle: {sys.argv[0]} --name {name} autologon")
+            f"ulaşamaz. Elle: {self_cmd('guest', '--name', name, 'autologon')}")
 
     # mkdir exits 1 on a directory that already exists, which is the state we
     # want; only silence from the agent is a failure worth stopping for.
@@ -1613,7 +1949,7 @@ def cmd_build(a):
 
     if domain_exists(a.name):
         if not a.force:
-            die(f"'{a.name}' zaten tanımlı. Önce: {sys.argv[0]} clean")
+            die(f"'{a.name}' zaten tanımlı. Önce: {self_cmd('guest', 'clean')}")
         cmd_clean(a)
 
     workdir = IMAGES / f"{a.name}-unattend"
@@ -1712,7 +2048,7 @@ def cmd_build(a):
     say(f"konsol oturumu açıldı ({', '.join(users)}); autologon yeniden yazılıyor")
     if not rearm_autologon(a.name, user, password):
         say("TUR YARIM -- konsol oturumu açıldı ama autologon kalıcı olmadı.")
-        say(f"  elle: {sys.argv[0]} --name {a.name} autologon")
+        say(f"  elle: {self_cmd('guest', '--name', a.name, 'autologon')}")
         return 1
 
     say("TUR GEÇTİ -- ajan ulaşılabilir, konsol oturumu açık, autologon kalıcı.")
@@ -1723,7 +2059,7 @@ def cmd_build(a):
     # A tool whose normal outcome is a red line teaches people to skip reading
     # the line. `setup` runs it whenever the guest is ready for it.
     if not a.setup:
-        say(f"  sıradaki: {sys.argv[0]} --name {a.name} setup")
+        say(f"  sıradaki: {self_cmd('guest', '--name', a.name, 'setup')}")
         return 0
     print()
     return guest_setup(a, a.name)
@@ -1794,7 +2130,7 @@ def cmd_autologon(a):
     if not set_autologon(a.name, user, password):
         return 1
     say("autologon yazıldı -- etkisi bir sonraki açılışta görünür")
-    say(f"  doğrulama: {sys.argv[0]} --name {a.name} status")
+    say(f"  doğrulama: {self_cmd('guest', '--name', a.name, 'status')}")
     return 0
 
 
@@ -1891,6 +2227,13 @@ def main(argv: list[str] | None = None) -> int:
     st.add_argument("--yes", action="store_true",
                     help="düz VT uyarısını sorma")
     st.set_defaults(func=lambda a: guest_setup(a, a.name))
+
+    u = sub.add_parser("usb", help="koşan misafire USB aygıtı ödünç ver / geri al")
+    u.add_argument("--attach", metavar="VENDOR:PRODUCT", default="",
+                   help="aygıtı koşan misafire ver (ör. 8087:0032)")
+    u.add_argument("--detach", metavar="VENDOR:PRODUCT", default="",
+                   help="aygıtı host'a geri al")
+    u.set_defaults(func=cmd_usb)
 
     pt = sub.add_parser("passthrough", help="kartı domain'e ver ya da geri al")
     pt.add_argument("--off", action="store_true", help="kartı domain'den çıkar")
