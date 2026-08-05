@@ -3,6 +3,7 @@
 
     ./guest/build.py build           # the whole round, ~7-10 min, unattended
     ./guest/build.py setup           # push and drive the three guest scripts
+    ./guest/build.py passthrough     # give the domain the dGPU (or --off)
     ./guest/build.py status          # where is it now
     ./guest/build.py screenshot      # what is on its screen
     ./guest/build.py autologon       # re-run just the console-session step
@@ -17,8 +18,18 @@ guest is worth building for reasons that have nothing to do with the display.
 WHAT `setup` MEASURES RATHER THAN CLAIMS. Each of the three scripts installs
 something the next one needs, so between them the guest's own inventory is read
 back: the monitor VDD created, the Looking Glass service's state, the display
-topology's verdict. An installer's exit code says the installer finished, which
-is a different sentence.
+topology's verdict, and at the end the adapter Looking Glass actually captures
+on. An installer's exit code says the installer finished, which is a different
+sentence.
+
+THE SAME ROUND RUNS WITH AND WITHOUT THE CARD, and that is the point of
+`passthrough` being a separate step. Without a hostdev the domain can be driven
+from the desktop as often as debugging needs, because nothing takes the card
+away; with one, `setup --start` is a handover round and belongs on a plain VT
+like `vfioctl selftest` does -- so it starts the guest itself, prints which
+driver the card ended up on, and tees everything to a log that outlives the
+terminal. The two rounds differ by exactly one thing, which is what makes the
+second one's result readable.
 
 THE FINISH LINE IS A GUEST THAT CAN BE DRIVEN, AND THAT TAKES TWO THINGS.
 An agent, because everything the host does afterwards goes over guest-exec --
@@ -67,6 +78,12 @@ HERE = Path(__file__).resolve().parent
 TEMPLATES = HERE / "templates"
 IMAGES = Path.home() / ".images"
 URI = "qemu:///system"
+PCI_DEVICES = Path("/sys/bus/pci/devices")
+
+# Same reason core/selftest.py writes one: a round that hands the card over can
+# take the graphics session with it, and a result that only existed in a dead
+# terminal is a round that has to be run again.
+SETUP_LOG = Path("/tmp/vfioctl-setup.log")
 
 # OWNERSHIP, AND WHY IT IS NOT A LIST OF NAMES. The destructive half of this
 # script used to be gated by a blacklist -- PROTECTED_DOMAINS = {"win11"} and the
@@ -116,6 +133,28 @@ def run(cmd, *, check=True, capture=True, **kw):
 
 def virsh(*args, check=True, capture=True):
     return run(["virsh", "-c", URI, *args], check=check, capture=capture)
+
+
+class Tee:
+    """stdout that also lands in a file, so a dying session cannot eat the run."""
+
+    def __init__(self, path: Path):
+        self.stream = sys.stdout
+        try:
+            self.file = path.open("a", encoding="utf-8")
+        except OSError:
+            self.file = None
+
+    def write(self, text: str) -> int:
+        if self.file:
+            self.file.write(text)
+            self.file.flush()
+        return self.stream.write(text)
+
+    def flush(self) -> None:
+        if self.file:
+            self.file.flush()
+        self.stream.flush()
 
 
 def say(msg):
@@ -251,6 +290,24 @@ def domain_claims(name: str) -> set[str]:
     return claims
 
 
+def pci_claims(name: str) -> set[str]:
+    """Only the PCI half of domain_claims -- i.e. does this domain take the card."""
+    return {c for c in domain_claims(name) if not c.startswith("mem-path:")}
+
+
+def host_driver_of(address: str) -> str:
+    """Which host driver holds a PCI function right now, or "(none)".
+
+    Read straight from sysfs, and read rather than assumed: after a start it is
+    the one line that says whether the handover hook did its job. Nothing here
+    writes to these paths -- the hook is the only writer, deliberately.
+    """
+    link = PCI_DEVICES / address / "driver"
+    if link.is_symlink():
+        return os.path.basename(os.path.realpath(link))
+    return "(none)"
+
+
 def domain_exists(name: str) -> bool:
     return virsh("domstate", name, check=False).returncode == 0
 
@@ -340,6 +397,175 @@ def ivshmem_parts() -> tuple[str, str]:
         return "", ""
     say(f"ivshmem: {KVMFR_NODE}, {size // (1024 * 1024)} MB (host'un static_size_mb'si)")
     return QEMU_NS, IVSHMEM_BLOCK.format(node=KVMFR_NODE, size=size)
+
+
+# --------------------------------------------------------------------------- #
+# handing the card to the domain
+# --------------------------------------------------------------------------- #
+
+# managed='no' IS THE WHOLE POINT AND IT IS NOT A DETAIL. With managed='yes'
+# libvirt detaches the device from its host driver itself, which would make it a
+# second writer to the same sysfs paths as the handover hook -- and a second
+# writer is what wedged this machine three times. The hook binds, libvirt only
+# opens what it is given. This mirrors the working guest's XML byte for byte.
+#
+# The guest-side <address> is deliberately absent: libvirt assigns a PCIe root
+# port and a slot, the same way it did for the guest this was copied from.
+HOSTDEV_XML = """    <hostdev mode='subsystem' type='pci' managed='no'>
+      <source>
+        <address domain='0x{domain:04x}' bus='0x{bus:02x}' \
+slot='0x{slot:02x}' function='0x{function:x}'/>
+      </source>
+    </hostdev>
+"""
+
+HOSTDEV_BLOCK = re.compile(
+    r"[ \t]*<hostdev mode='subsystem' type='pci'.*?</hostdev>\n",
+    re.DOTALL,
+)
+
+
+def address_parts(address: str) -> dict[str, int]:
+    """0000:01:00.0 -> the four numbers libvirt wants, or a refusal."""
+    m = re.fullmatch(r"([0-9a-f]{4}):([0-9a-f]{2}):([0-9a-f]{2})\.([0-7])",
+                     address.lower())
+    if not m:
+        die(f"PCI adresi anlaşılmadı: {address}")
+    d, b, s, f = m.groups()
+    return {"domain": int(d, 16), "bus": int(b, 16),
+            "slot": int(s, 16), "function": int(f, 16)}
+
+
+def redefine(xml_text: str):
+    """Hand libvirt an edited domain XML. Callers verify the result afterwards."""
+    with tempfile.NamedTemporaryFile("w", suffix=".xml", delete=False) as fh:
+        fh.write(xml_text)
+        tmp = fh.name
+    try:
+        virsh("define", tmp, capture=False)
+    finally:
+        os.unlink(tmp)
+
+
+def dgpu_addresses(profile_name: str | None) -> list[str]:
+    """The PCI functions this machine's discrete GPU occupies, gate first.
+
+    THE GATE IS core.doctor.gate() AND NOT A CHECK OF OUR OWN. A domain that
+    names a PCI address is as machine-specific as anything `install` writes, and
+    on a machine the tool does not recognise the address would be a guess with a
+    VM built on top of it. CLAUDE.md: one owner for that question, so that a new
+    subcommand cannot accidentally skip it.
+
+    The audio function comes along because it shares the IOMMU group: handing
+    over one without the other leaves the guest with a card whose sound device
+    is still on the host, and the group is the unit a handover moves.
+    """
+    sys.path.insert(0, str(HERE.parent))
+    from core import doctor, hostfiles, install as install_mod, probe
+
+    open_gate, p, _ = doctor.gate(profile_name)
+    if not open_gate or p is None:
+        die("Kapı kapalı -- bu makinede karta dokunan bir domain tanımlanmaz. "
+            "Teşhis: ./vfioctl doctor")
+    layout = install_mod.resolve(probe.read_machine(), p)
+    if layout is None:
+        die("Kartın adresleri çözülemedi. Teşhis: ./vfioctl doctor")
+    if not hostfiles.HOOK.exists():
+        say(f"UYARI: {hostfiles.HOOK} yok -- kartı devredecek hook kurulu değil, "
+            "domain başlatılamaz. Önce: ./vfioctl install")
+    return [layout.dgpu] + ([layout.dgpu_audio] if layout.dgpu_audio else [])
+
+
+def cmd_passthrough(a):
+    """Put the card into a domain we built, or take it back out.
+
+    WHY THIS IS A COMMAND AND NOT `virsh edit`. It is the one difference between
+    the cardless rehearsal and the round that proves the setup, so it has to be
+    a single reversible step rather than a hand edit made at the wrong moment --
+    and the moment is usually a plain VT with the desktop's card at stake.
+
+    IT ONLY EDITS A SHUT-OFF DOMAIN. Attaching a hostdev to a running guest asks
+    libvirt to bind the device there and then, outside the hook and with the
+    host still driving the card. The hook runs at domain start; that is the only
+    time the card moves.
+
+    The edit is a text insertion rather than an XML round trip on purpose: the
+    stored XML carries blocks this script did not write -- libosinfo's metadata,
+    our own ownership mark, the qemu:commandline that carries Looking Glass --
+    and re-serialising all of them to change two is how one of them quietly
+    comes back different. What changed is read back from libvirt afterwards.
+    """
+    disk = Path(a.disk)
+    guard(a.name, disk)
+    if not domain_exists(a.name):
+        die(f"'{a.name}' tanımlı değil")
+    state = domain_state(a.name)
+    if state != "shut off":
+        die(f"'{a.name}' şu an '{state}' -- kart yalnızca kapalı bir domain'e "
+            f"eklenir. Kartı domain açılırken hook taşır, çalışırken kimse.")
+
+    addresses = dgpu_addresses(a.profile)
+    xml = virsh("dumpxml", a.name).stdout
+    kept, dropped = [], []
+    for block in HOSTDEV_BLOCK.findall(xml):
+        (dropped if any(_matches(block, addr) for addr in addresses)
+         else kept).append(block)
+
+    if a.off:
+        if not dropped:
+            say(f"'{a.name}' zaten kartsız -- değişiklik yok")
+            return 0
+        for block in dropped:
+            xml = xml.replace(block, "", 1)
+    else:
+        if len(dropped) == len(addresses):
+            say(f"'{a.name}' kartı zaten alıyor -- değişiklik yok")
+            return 0
+        # A partial set is worse than none -- the guest would get the GPU
+        # without its audio function -- so the pair is rewritten as a whole.
+        for block in dropped:
+            xml = xml.replace(block, "", 1)
+        added = "".join(HOSTDEV_XML.format(**address_parts(addr))
+                        for addr in addresses)
+        xml = xml.replace("  </devices>", added + "  </devices>", 1)
+
+    redefine(xml)
+
+    # Read back rather than trust the define: this is the step where a lost
+    # ownership mark or a dropped ivshmem block would only surface as "Looking
+    # Glass shows nothing" a quarter of an hour later.
+    after = virsh("dumpxml", a.name).stdout
+    claims = pci_claims(a.name)
+    say(f"'{a.name}' aldığı PCI işlevleri: {' '.join(sorted(claims)) or '(yok)'}")
+    say(f"  işaret: {'duruyor' if marker_of(a.name) else 'YOK -- kaybolmuş'}")
+    say(f"  ivshmem: {'duruyor' if 'mem-path' in after else 'yok'}")
+    if a.off:
+        remaining = set(addresses) & claims
+        if remaining:
+            die(f"kart çıkarılamadı -- domain hâlâ istiyor: "
+                f"{' '.join(sorted(remaining))}")
+    else:
+        missing = set(addresses) - claims
+        if missing:
+            die(f"kart eklenemedi -- eksik: {' '.join(sorted(missing))}")
+        for addr in addresses:
+            say(f"  {addr} şu an host'ta: {host_driver_of(addr)}")
+        say("Bundan sonrası düz VT'den koşulur: "
+            f"{sys.argv[0]} --name {a.name} setup --start")
+    return 0
+
+
+def _matches(block: str, address: str) -> bool:
+    """Does this <hostdev> block point at that PCI function?
+
+    Matched on the four attributes rather than on a rendered line, because the
+    text being searched is libvirt's output and this script's rendering only
+    has to agree with it semantically.
+    """
+    parts = address_parts(address)
+    return all(f"{key}='0x{parts[key]:0{width}x}'" in block
+               for key, width in (("domain", 4), ("bus", 2),
+                                  ("slot", 2), ("function", 1)))
 
 
 def build_unattend_iso(workdir: Path, unattend_xml: str, out_iso: Path):
@@ -749,6 +975,21 @@ def display_adapters(name: str) -> list[dict]:
                          "Select-Object Name,PNPDeviceID | ConvertTo-Json -Compress")
 
 
+def display_devices(name: str) -> list[dict]:
+    """Every display-class PnP device the guest has, working or not.
+
+    Win32_VideoController only lists adapters that have a display driver bound,
+    so a passed-through card whose driver the guest does not have is INVISIBLE
+    there -- it sits in this list instead, with a problem code. Printed before
+    the round starts choosing anything, because "the card is not in the guest"
+    and "the card is in the guest with no driver" need different answers and
+    look identical from the adapter list.
+    """
+    return ps_json(name, "Get-PnpDevice -Class Display | Select-Object "
+                         "Status,Problem,FriendlyName,InstanceId | "
+                         "ConvertTo-Json -Compress")
+
+
 def monitors(name: str) -> list[dict]:
     return ps_json(name, "Get-PnpDevice -Class Monitor -PresentOnly | "
                          "Select-Object Status,FriendlyName,InstanceId | "
@@ -761,7 +1002,81 @@ def lg_service(name: str) -> list[dict]:
                          "ConvertTo-Json -Compress")
 
 
-def choose_gpu(name: str) -> str | None:
+def display_modes(name: str) -> list[dict]:
+    """Every adapter with the mode it is driving, or nulls when it drives none.
+
+    The resolution is the acceptance number for the card-side round (the shared
+    memory window is sized for it on the host), and an adapter that is present
+    but attached to nothing answers with nulls rather than with an error --
+    which is itself the reading that says the topology step did not take.
+    """
+    return ps_json(name, "Get-CimInstance Win32_VideoController | Select-Object "
+                         "Name,CurrentHorizontalResolution,"
+                         "CurrentVerticalResolution,CurrentRefreshRate | "
+                         "ConvertTo-Json -Compress")
+
+
+# NOT NEXT TO THE BINARY, whatever the installer's own instructions suggest:
+# measured 2026-08-05, the host writes under ProgramData and rotates -- .1, .2,
+# .3 -- one file per process. Under the service that is one file per capture
+# attempt, so the unsuffixed name is the newest attempt and the only one worth
+# reading. looking-glass.ps1 pointed at Program Files and printed "no log yet"
+# for a file that existed all along, which is why this constant is here.
+LG_HOST_LOG = r"C:\ProgramData\Looking Glass (host)\looking-glass-host.txt"
+
+# What the host says on its way to capturing, or failing to: which backend it
+# tried, which adapters it rejected, and whether it gave up.
+LG_LOG_SIGNALS = re.compile(
+    r"enumerateDevices|dxgi_init|captureStart|Trying |adapter|IVSHMEM|exited",
+    re.IGNORECASE,
+)
+LG_CAPTURE_FAILED = re.compile(
+    r"Failed to (initialize the capture device|find a supported capture "
+    r"interface|locate a valid output device)",
+    re.IGNORECASE,
+)
+
+
+def _ps_quote(text: str) -> str:
+    return "'" + text.replace("'", "''") + "'"
+
+
+def lg_capture_device(name: str, gpu: str) -> tuple[list[str], bool | None]:
+    """Is Looking Glass really capturing, and on the adapter VDD renders on?
+
+    THIS IS THE EVIDENCE HALF OF THE CARD-SIDE ROUND, and the measurement that
+    showed the earlier ones were not enough: a service reading `Running` is a
+    service that keeps RESTARTING a host process which exits immediately, and
+    from outside the two are identical. Measured on the cardless rehearsal --
+    "Not using unsupported adapter: Microsoft Basic Render Driver" three times,
+    then "Failed to find a supported capture interface", then "Host application
+    exited", with the service still Running and every other check green.
+
+    The other half of the question is which adapter it settled on: everything
+    can be true while the captured desktop lives on the emulated adapter, and
+    that reaches the operator as "the client connects and no frames arrive".
+
+    Returns (lines worth printing, verdict): False when the log says capture
+    failed, True when it names the adapter we chose and does not, None when the
+    log cannot be read or says neither -- unknown is reported as unknown rather
+    than counted as a pass.
+    """
+    code, out, _ = powershell(name, ["-Command",
+        f"$p={_ps_quote(LG_HOST_LOG)}; if (Test-Path -LiteralPath $p) "
+        f"{{ Get-Content -LiteralPath $p }} else {{ 'NOLOG' }}"], timeout=120)
+    if code != 0 or out.strip() in ("", "NOLOG"):
+        return [], None
+
+    log = out.splitlines()
+    lines = [line.strip() for line in log if LG_LOG_SIGNALS.search(line)]
+    if any(LG_CAPTURE_FAILED.search(line) for line in log):
+        return lines, False
+    if any(gpu.lower() in line.lower() for line in log):
+        return lines, True
+    return lines, None
+
+
+def choose_gpu(name: str, expect_card: bool = False) -> str | None:
     """Which adapter the indirect display should render on -- asked, not assumed.
 
     THE DEFAULT USED TO BE THIS MACHINE'S CARD, spelled out in vdd.ps1's
@@ -779,6 +1094,14 @@ def choose_gpu(name: str) -> str | None:
     passthrough adapter present -- the cardless rehearsal -- it says so and uses
     the one adapter that exists. With more than one candidate it refuses to
     guess, because guessing wrong is the silent failure above.
+
+    expect_card TURNS THE REHEARSAL BRANCH INTO A REFUSAL, and it is set when
+    the domain claims a PCI function. "The card was handed over and the guest
+    shows no card" is a contradiction, not a rehearsal: the usual cause is that
+    the guest has no driver for it, which leaves the device out of the adapter
+    list entirely (see display_devices). Falling back to the one remaining
+    adapter there would render the indirect display on the emulated one and
+    pass every later check -- the exact silent failure this function exists for.
     """
     adapters = display_adapters(name)
     if not adapters:
@@ -798,6 +1121,12 @@ def choose_gpu(name: str) -> str | None:
     if len(candidates) == 1:
         return candidates[0].get("Name")
     if not candidates:
+        if expect_card:
+            say("  domain kartı alıyor ama misafirde kart görünmüyor -- bu bir "
+                "prova değil, çelişki")
+            say("  muhtemel sebep: misafirde kartın sürücüsü yok, cihaz "
+                "bağdaştırıcı listesine hiç girmiyor (yukarıdaki PnP dökümü)")
+            return None
         if len(real) == 1:
             say("  devredilmiş kart yok -- kartsız prova, tek bağdaştırıcı seçiliyor")
             return real[0].get("Name")
@@ -850,6 +1179,61 @@ def run_guest_script(name: str, script: Path, args: list[str],
     return True
 
 
+def confirm_plain_vt(a, name: str, claims: set[str]) -> bool:
+    """Refuse to take the desktop's card away from inside the desktop, unasked.
+
+    Same guard as `vfioctl selftest`, and the same reason: if the handover goes
+    wrong the graphics session is what dies, and a terminal inside it dies with
+    it -- taking the output of the round that would have explained why. It only
+    asks when the domain actually claims a PCI function, because the cardless
+    rehearsal is meant to be run from the desktop as often as debugging needs.
+    """
+    if getattr(a, "yes", False) or not sys.stdin.isatty():
+        return True
+    try:
+        tty = os.ttyname(sys.stdin.fileno())
+    except OSError:
+        return True
+    if not tty.startswith("/dev/pts/") or os.environ.get("SSH_CONNECTION"):
+        return True
+    print(f"'{name}' kartı istiyor ({' '.join(sorted(claims))}) ve bu kabuk "
+          "grafik oturumunun içindeki bir terminale benziyor.")
+    print("Devir sırasında oturum ölürse bu kabuk da onunla ölür; düz bir VT "
+          "(Ctrl+Alt+F3) doğru yerdir.")
+    return input("Yine de devam? [e/H] ").strip().lower() in ("e", "y")
+
+
+def start_for_setup(a, name: str, workdir: Path) -> bool:
+    """Bring the guest up for a round, and report what the card did.
+
+    The driver each claimed function ends up on is read from sysfs before and
+    after: with managed='no' a domain whose card is still held by the host
+    driver does not start at all, so `running` plus `vfio-pci` is the handover's
+    receipt. Nothing here moves the card -- the hook does, at domain start.
+    """
+    state = domain_state(name)
+    if state == "running":
+        say(f"'{name}' zaten çalışıyor")
+        return True
+    if state != "shut off":
+        say(f"'{name}' '{state}' -- başlatılamaz")
+        return False
+
+    claims = pci_claims(name)
+    if claims and not confirm_plain_vt(a, name, claims):
+        return False
+    guard_exclusive_devices(name)
+    for addr in sorted(claims):
+        say(f"başlamadan önce {addr} -> {host_driver_of(addr)}")
+
+    virsh("start", name, capture=False)
+    for addr in sorted(claims):
+        driver = host_driver_of(addr)
+        say(f"başladıktan sonra {addr} -> {driver}"
+            + ("" if driver == "vfio-pci" else "   <-- beklenen vfio-pci"))
+    return wait_for_agent(name, workdir, a.timeout)
+
+
 def guest_setup(a, name: str) -> int:
     """Drive the three guest scripts in order, stopping at the first failure.
 
@@ -868,11 +1252,19 @@ def guest_setup(a, name: str) -> int:
     values with it -- so a session that was there when the round started can be
     gone by the time the step that needs it runs.
     """
-    if not agent_ping(name):
-        die(f"'{name}' ajanı yanıt vermiyor -- önce build")
-
+    sys.stdout = Tee(SETUP_LOG)  # type: ignore[assignment]
     workdir = IMAGES / f"{name}-unattend"
     workdir.mkdir(parents=True, exist_ok=True)
+
+    print()
+    say(f"===== setup {name}   günlük: {SETUP_LOG}")
+    if getattr(a, "start", False) and not start_for_setup(a, name, workdir):
+        say("TUR DÜŞTÜ -- misafir sürülebilir hâle gelmedi.")
+        return 1
+
+    if not agent_ping(name):
+        die(f"'{name}' ajanı yanıt vermiyor -- önce build (ya da setup --start)")
+
     if not ensure_console_session(name, workdir):
         die("misafirde konsol oturumu açılamadı -- display-layout ekrana "
             f"ulaşamaz. Elle: {sys.argv[0]} --name {name} autologon")
@@ -883,7 +1275,18 @@ def guest_setup(a, name: str) -> int:
     if code is None:
         die(f"{GUEST_DIR} oluşturulamadı -- ajan cevap vermedi")
 
-    gpu = a.gpu_name or choose_gpu(name)
+    # With a card in the domain the guest's own view of it is worth printing
+    # before anything is chosen: a device sitting there with a problem code is a
+    # different story from one that never arrived, and neither shows up in the
+    # adapter list the choice is made from.
+    claims = pci_claims(name)
+    if claims:
+        say(f"domain'in aldığı PCI işlevleri: {' '.join(sorted(claims))}")
+        for device in display_devices(name):
+            say(f"  PnP: {device.get('Status')} problem={device.get('Problem')} "
+                f"{device.get('FriendlyName')} [{device.get('InstanceId')}]")
+
+    gpu = a.gpu_name or choose_gpu(name, expect_card=bool(claims))
     if not gpu:
         die("VDD'nin render edeceği bağdaştırıcı belirlenemedi -- --gpu-name ver")
     say(f"VDD bağdaştırıcısı: {gpu}")
@@ -925,7 +1328,44 @@ def guest_setup(a, name: str) -> int:
         say(f"  geri alma: misafirde {GUEST_DIR}\\display-layout.ps1 -Reattach")
         return 1
 
+    # 4. what the round produced, read back once more. The three steps above each
+    # proved their own half; these two lines are the sentence the whole round was
+    # for -- at what resolution, and on which card.
+    print()
+    say("Sonuç ölçümü")
+    for mode in display_modes(name):
+        width = mode.get("CurrentHorizontalResolution")
+        pixels = (f"{width}x{mode.get('CurrentVerticalResolution')} @ "
+                  f"{mode.get('CurrentRefreshRate')} Hz" if width
+                  else "mod yok (hiçbir ekranı sürmüyor)")
+        say(f"  {mode.get('Name')}: {pixels}")
+
+    lines, captures = lg_capture_device(name, gpu)
+    for line in lines[-10:]:
+        print(f"    | {line}")
+    if captures is None:
+        say("  LG yakalama: BİLİNMİYOR -- günlük okunamadı ya da hangi "
+            "bağdaştırıcıyı seçtiğini yazmıyor")
+    elif captures:
+        say(f"  LG yakalama: '{gpu}' -- VDD'ye verilen bağdaştırıcı")
+    elif not claims:
+        # Measured, and it is the hardware's answer rather than a defect: with
+        # no real GPU in the guest neither D12 nor DXGI finds a supported
+        # adapter, so the host exits and the service restarts it forever. The
+        # rehearsal is about the three scripts running in order; making its
+        # normal outcome a red line would teach the reader to skip the line.
+        say("  LG yakalama: YOK -- kartsız provada beklenen. Gerçek bir "
+            "bağdaştırıcı olmadan D12 de DXGI de yakalayamıyor; servis "
+            "'Running' görünse de host süreci her seferinde çıkıyor.")
+    else:
+        say("ADIM DÜŞTÜ -- LG host yakalamayı başlatamadı (günlük yukarıda). "
+            "Servisin 'Running' olması yalnızca onu yeniden başlattığını "
+            "söyler; istemci bağlanır ve hiç kare gelmez.")
+        return 1
+
     say("KURULUM GEÇTİ -- VDD ekranı var, LG host çalışıyor, misafir tek ekranda.")
+    if pci_claims(name):
+        say(f"  kapatmak: virsh -c {URI} shutdown {name}  (kart o zaman geri döner)")
     return 0
 
 
@@ -1013,13 +1453,7 @@ def cmd_build(a):
         "VIRTIOISO": virtio_iso,
         "UNATTENDISO": unattend_iso,
     })
-    with tempfile.NamedTemporaryFile("w", suffix=".xml", delete=False) as fh:
-        fh.write(dom_xml)
-        tmp = fh.name
-    try:
-        virsh("define", tmp, capture=False)
-    finally:
-        os.unlink(tmp)
+    redefine(dom_xml)
     say(f"domain tanımlandı: {a.name}")
 
     # 5. run it
@@ -1211,7 +1645,19 @@ def main():
     st = sub.add_parser("setup", help="misafir betiklerini sür (VDD, LG, ekran)")
     st.add_argument("--gpu-name", default="",
                     help="VDD'nin render edeceği bağdaştırıcı (boşsa misafirde keşfedilir)")
+    st.add_argument("--start", action="store_true",
+                    help="domain kapalıysa başlat ve ajanı bekle (kartlı tur: düz VT)")
+    st.add_argument("--timeout", type=int, default=15,
+                    help="ajan için dakika (varsayılan 15)")
+    st.add_argument("--yes", action="store_true",
+                    help="düz VT uyarısını sorma")
     st.set_defaults(func=lambda a: guest_setup(a, a.name))
+
+    pt = sub.add_parser("passthrough", help="kartı domain'e ver ya da geri al")
+    pt.add_argument("--off", action="store_true", help="kartı domain'den çıkar")
+    pt.add_argument("--profile", default=None,
+                    help="DMI ile seçmek yerine adı verilen profili kullan")
+    pt.set_defaults(func=cmd_passthrough)
 
     c = sub.add_parser("clean", help="domain + disk + çalışma dizini sil")
     c.set_defaults(func=cmd_clean)

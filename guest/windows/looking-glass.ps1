@@ -75,8 +75,13 @@ try {
     Get-Service | Where-Object { $_.DisplayName -like '*Looking Glass*' -or $_.Name -like '*looking*' } |
         Select-Object Name, DisplayName, Status, StartType | Format-List
 
-    Say 'install log tail (the host writes its own)'
-    $hostLog = 'C:\Program Files\Looking Glass (host)\looking-glass-host.txt'
+    # UNDER ProgramData, NOT next to the binary (measured 2026-08-05). The old
+    # path here printed "no log yet" for a file that existed all along -- and
+    # the file is the only place that says whether capture actually started,
+    # which the service's Status cannot tell you: it restarts a host process
+    # that exits immediately just as faithfully as it runs one that works.
+    Say 'host log tail (the host writes its own, and rotates it per process)'
+    $hostLog = 'C:\ProgramData\Looking Glass (host)\looking-glass-host.txt'
     if (Test-Path $hostLog) { Get-Content $hostLog -Tail 25 } else { Say "no $hostLog yet" }
     Say 'done'
 }

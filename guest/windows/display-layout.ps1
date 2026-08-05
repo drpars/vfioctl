@@ -180,6 +180,25 @@ public static class Disp
         }
     }
 
+    # The mode each adapter ended up driving. It is asked HERE and not from
+    # build.py because the agent runs in session 0, which has no display devices
+    # -- a resolution read from there is an answer about nothing. CIM rather
+    # than one more marshalled struct: this half only reports, and a reporting
+    # step must not be able to fail the round, hence the catch.
+    function Show-Modes {
+        try {
+            foreach ($v in Get-CimInstance Win32_VideoController) {
+                if ($v.CurrentHorizontalResolution) {
+                    Log ("   mode {0}: {1}x{2} @ {3} Hz" -f $v.Name,
+                        $v.CurrentHorizontalResolution, $v.CurrentVerticalResolution,
+                        $v.CurrentRefreshRate)
+                }
+                else { Log ("   mode {0}: driving no display" -f $v.Name) }
+            }
+        }
+        catch { Log "   mode: could not be read -- $_" }
+    }
+
     # The goal: the target is attached, and it is the only one.
     function Test-Goal {
         $att = @(Get-Displays | Where-Object { $_.Attached })
@@ -205,6 +224,7 @@ public static class Disp
 
     if (Test-Goal) {
         Log "== '$AdapterMatch' is already the only attached display, nothing to do"
+        Show-Modes
         Log 'DONE'
         return
     }
@@ -221,11 +241,13 @@ public static class Disp
         Log '== neither topology worked, restoring the extended desktop'
         Invoke-Switch 'extend'
         Show-Displays 'after' (Get-Displays)
+        Show-Modes
         Log "FAILED: could not isolate '$AdapterMatch'"
         return
     }
 
     Show-Displays 'after' (Get-Displays)
+    Show-Modes
     Log 'DONE'
 }
 catch {

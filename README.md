@@ -167,6 +167,8 @@ arda beş kez.
 ```sh
 ./guest/build.py build --user <ad> --password-file <yol>
 ./guest/build.py setup          # VDD → Looking Glass host → tek ekran
+./guest/build.py passthrough    # domain'e kartı ver (geri almak: --off)
+./guest/build.py setup --start  # domain'i başlat + turu koş (kartlıysa: düz VT)
 ./guest/build.py status
 ./guest/build.py clean
 ```
@@ -180,7 +182,20 @@ VDD'nin ekranı doğmalı. Bu yüzden her adım **kurucunun çıkış kodunu de�
 misafirin envanterini** okur — VDD'nin oluşturduğu monitör, LG servisinin
 durumu, topolojinin kendi hükmü. VDD'nin render edeceği bağdaştırıcı da
 misafirde keşfedilir (`--gpu-name` ile geçilebilir): adı yalnızca Windows
-bilir, ve yanlış ad "LG bağlanıyor ama hiç kare gelmiyor" olarak görünür.
+bilir, ve yanlış ad "LG bağlanıyor ama hiç kare gelmiyor" olarak görünür. Turun
+sonunda bu iddia da ölçülür: Looking Glass host'un kendi günlüğünden **hangi
+bağdaştırıcıda yakaladığı** okunur, ve VDD'ye verilenle uyuşmuyorsa tur düşer.
+
+**Kart domain'e ayrı bir adımda girer (`passthrough`).** Kartsız domain,
+masaüstü canlıyken istenildiği kadar sürülebilir — hata ayıklama turu kimseden
+bir şey götürmez. Kart girdiği anda tur bir **devir** turu olur: `setup --start`
+domain'i kendisi başlatır, kartın hangi sürücüde bittiğini sysfs'ten okur ve
+her şeyi `/tmp/vfioctl-setup.log`'a yazar — `selftest` gibi, düz bir VT'den
+koşulur. İki tur **tek bir şeyle** ayrılır; sonucu okunabilir kılan da budur.
+
+Komut yalnızca **kapalı** bir domain'i düzenler ve `managed='no'` yazar:
+çalışan bir misafire hostdev takmak da, libvirt'e cihazı kendi çözdürmek de
+karta ikinci bir yazar demek olurdu. Kartı yalnızca hook taşır.
 
 **Yıkıcı yol yalnızca bu betiğin ürettiği misafirlere uygulanır.** `build`
 tanımladığı her domain'i kendi ad alanında işaretler; `clean` işaretsiz bir
