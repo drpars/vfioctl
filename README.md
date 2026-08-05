@@ -72,6 +72,7 @@ core/                     # probe (makineyi okur) + profile + doctor/gate
 │                         # + inventory (başka ne devredilebilir, bedeli ne)
 │                         # + hostfiles/install (host tarafı) + selftest
 data/50-vfio-handover     # devri yapan libvirt hook'u
+docs/                     # tek bir arızanın kaydı: ölçüm, elenenler, risk
 profiles/                 # tanınan makineler, birer .toml
 guest/
 ├── build.py              # boş diskten konsol oturumu açık Windows'a, gözetimsiz
@@ -295,6 +296,17 @@ yalnızca yazıldığı makineyi korur.
 yazıldığı — hangi API'nin sessizce başarısız olduğu, hangi sıranın zorunlu
 olduğu — koddan değerli; oralar okunmadan değiştirilmemeli.
 
+## Bilinen sorunlar
+
+**USB Bluetooth radyosu misafirde Kod 10 veriyor.** Radyo misafire devredilince
+doğru adıyla görünüyor ama başlamıyor (`CM_PROB_FAILED_START` / `0xC0000001`);
+host tarafında `btusb` hiç düşmüyor. Çözüm domain tanımına tek satır —
+`<qemu:del capability='usb-host.hostdevice'/>` — ve **vfioctl bunu yazmaz,**
+elle yazılır. Düzeltme ampirik ve tekrarlanabilir, **sebebi bilinmiyor**; beş
+açıklama ölçülüp elendi. Her USB devri bunu istemiyor: aynı makinede bir fare
+alıcısı varsayılan kipte sorunsuz devredildi. Ayrıntı, ölçümler, elenen
+açıklamalar ve bilinen risk → [docs/bluetooth-code10.md](docs/bluetooth-code10.md).
+
 ## Yol haritası
 
 | Faz | İçerik |
@@ -341,4 +353,6 @@ git config core.hooksPath .githooks
 
 ## Lisans
 
-Henüz seçilmedi.
+[MIT](LICENSE). Kullanın, değiştirin, dağıtın; telif satırını koruyun.
+**Garanti yoktur:** bu araç `/etc`'e yazar ve bir grafik oturumunu bozabilir —
+önce `doctor`, sonra `install --check`.
