@@ -197,43 +197,50 @@ def guard(name: str, disk: Path):
             f"bu betik ona dokunmaz.")
 
 
-def guard_single_card(name: str):
-    """Refuse to start a passthrough guest while another one holds the card.
+def guard_exclusive_devices(name: str):
+    """Refuse to start a guest while another running one claims the same device.
 
-    There is one dGPU, so two domains claiming it cannot run at once. Leaving
-    that to libvirt means the operator reads "VM failed to start" and has to
-    work out for themselves whether the cause was the card, the hook or the
-    domain -- and this is the round where a second passthrough domain exists on
-    this machine for the first time.
+    Two things here cannot be shared and both are single: the dGPU, and the
+    kvmfr window at /dev/kvmfr0. Leaving the clash to libvirt means the operator
+    reads "VM failed to start" and has to work out for themselves whether the
+    cause was the card, the shared memory, the hook or the domain. This is the
+    round where a second domain claiming either exists on this machine for the
+    first time.
     """
-    ours = domain_hostdevs(name)
+    ours = domain_claims(name)
     if not ours:
         return
     for other in defined_domains():
         if other == name or domain_state(other) != "running":
             continue
-        clash = ours & domain_hostdevs(other)
+        clash = ours & domain_claims(other)
         if clash:
-            die(f"'{other}' çalışıyor ve aynı PCI cihazını istiyor "
-                f"({', '.join(sorted(clash))}) -- tek kart var, önce onu kapat.")
+            die(f"'{other}' çalışıyor ve aynı cihazı istiyor "
+                f"({', '.join(sorted(clash))}) -- paylaşılamaz, önce onu kapat.")
 
 
-def domain_hostdevs(name: str) -> set[str]:
-    """PCI addresses the domain passes through, as 0000:01:00.0 strings."""
+def domain_claims(name: str) -> set[str]:
+    """Host devices the domain takes exclusively: PCI functions and mem-paths.
+
+    The mem-path comes out of qemu:commandline with a regex rather than an XML
+    walk, because the argument is a JSON string inside an attribute and libvirt
+    is free to hand it back with either quoting style.
+    """
     r = virsh("dumpxml", name, check=False)
     if r.returncode != 0:
         return set()
+    claims = {f"mem-path:{p}" for p in
+              re.findall(r"mem-path[\"']?\s*:\s*[\"']([^\"']+)", r.stdout)}
     try:
         root = ElementTree.fromstring(r.stdout)
     except ElementTree.ParseError:
-        return set()
-    addrs = set()
+        return claims
     for hostdev in root.findall("./devices/hostdev[@type='pci']"):
         addr = hostdev.find("./source/address")
         if addr is None:
             continue
         try:
-            addrs.add("{:04x}:{:02x}:{:02x}.{}".format(
+            claims.add("{:04x}:{:02x}:{:02x}.{}".format(
                 int(addr.get("domain", "0x0"), 16),
                 int(addr.get("bus", "0x0"), 16),
                 int(addr.get("slot", "0x0"), 16),
@@ -241,7 +248,7 @@ def domain_hostdevs(name: str) -> set[str]:
             ))
         except ValueError:
             continue
-    return addrs
+    return claims
 
 
 def domain_exists(name: str) -> bool:
@@ -283,6 +290,56 @@ def render(template: Path, values: dict) -> str:
     except ElementTree.ParseError as exc:
         die(f"{template.name}: üretilen XML geçersiz: {exc}")
     return text
+
+
+KVMFR_NODE = Path("/dev/kvmfr0")
+KVMFR_MODPROBE = Path("/etc/modprobe.d/kvmfr.conf")
+
+QEMU_NS = " xmlns:qemu='http://libvirt.org/schemas/domain/qemu/1.0'"
+
+IVSHMEM_BLOCK = """  <qemu:commandline>
+    <qemu:arg value='-device'/>
+    <qemu:arg value="{{'driver':'ivshmem-plain','id':'shmem0','memdev':'looking-glass'}}"/>
+    <qemu:arg value='-object'/>
+    <qemu:arg value="{{'qom-type':'memory-backend-file','id':'looking-glass','mem-path':'{node}','size':{size},'share':true}}"/>
+  </qemu:commandline>
+"""
+
+
+def kvmfr_size_bytes() -> int | None:
+    """The host's kvmfr window, in bytes, read from the host rather than guessed.
+
+    The size in the domain and static_size_mb on the host MUST agree; a guest
+    that maps a different size gives a client which attaches and shows nothing.
+    The parameter cannot be read back from sysfs -- kvmfr declares it with
+    perm=0, so /sys/module/kvmfr/parameters never appears -- so the file that
+    set it is the only source there is.
+    """
+    try:
+        text = KVMFR_MODPROBE.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    m = re.search(r"static_size_mb\s*=\s*(\d+)", text)
+    return int(m.group(1)) * 1024 * 1024 if m else None
+
+
+def ivshmem_parts() -> tuple[str, str]:
+    """(namespace attribute, qemu:commandline block) for the Looking Glass path.
+
+    Both halves or neither: a qemu:commandline block without xmlns:qemu is
+    dropped by libvirt SILENTLY -- no error, and the arguments simply never
+    reach QEMU. Absent kvmfr on the host, the domain is written without either,
+    which is a guest that boots and installs fine and simply has no LG.
+    """
+    if not KVMFR_NODE.exists():
+        say(f"{KVMFR_NODE} yok -- domain ivshmem'siz yazılıyor (LG adımı çalışmaz)")
+        return "", ""
+    size = kvmfr_size_bytes()
+    if size is None:
+        say(f"{KVMFR_MODPROBE} okunamadı -- domain ivshmem'siz yazılıyor")
+        return "", ""
+    say(f"ivshmem: {KVMFR_NODE}, {size // (1024 * 1024)} MB (host'un static_size_mb'si)")
+    return QEMU_NS, IVSHMEM_BLOCK.format(node=KVMFR_NODE, size=size)
 
 
 def build_unattend_iso(workdir: Path, unattend_xml: str, out_iso: Path):
@@ -444,6 +501,78 @@ def rearm_autologon(name: str, user: str, password: str, attempts: int = 3) -> b
         time.sleep(15)
         if autologon_armed(name):
             return True
+    return False
+
+
+def registry_value(name: str, key: str, value: str) -> str | None:
+    code, out, _ = guest_exec(name, "reg.exe", ["query", key, "/v", value])
+    if code != 0:
+        return None
+    m = re.search(rf"^\s*{re.escape(value)}\s+REG_\w+\s+(.*)$",
+                  out, re.MULTILINE)
+    return m.group(1).strip() if m else None
+
+
+def repair_autologon(name: str) -> bool:
+    """Put back the autologon OOBE's cleanup removed, without a password.
+
+    MEASURED 2026-08-05, and it is the same cleanup rearm_autologon was written
+    for -- it simply runs again, later, at the next logoff. The signature is
+    unmistakable and is exactly what was found here: AutoAdminLogon and
+    DefaultUserName gone, DefaultPassword still sitting in the registry in clear
+    text, guest on the lock screen.
+
+    That residue is what makes this repair possible without the caller holding
+    credentials: the password is already there, and the account name survives in
+    LastUsedUsername. So `setup` can put a console session back on its own
+    rather than demanding the password file a second time -- which matters,
+    because the session can disappear between two steps of the same run.
+    """
+    user = (registry_value(name, WINLOGON, "DefaultUserName")
+            or registry_value(name, WINLOGON, "LastUsedUsername"))
+    if not user:
+        say("  autologon onarılamadı: kullanıcı adı kayıtta yok")
+        return False
+    if registry_value(name, WINLOGON, "DefaultPassword") is None:
+        say("  autologon onarılamadı: kayıtta parola yok, --password-file gerekir")
+        return False
+    for extra in (["/v", "AutoAdminLogon", "/t", "REG_SZ", "/d", "1", "/f"],
+                  ["/v", "DefaultUserName", "/t", "REG_SZ", "/d", user, "/f"]):
+        code, _, err = guest_exec(name, "reg.exe", ["add", WINLOGON, *extra])
+        if code != 0:
+            say(f"  autologon onarılamadı ({extra[1]}): {err.strip()}")
+            return False
+    guest_exec(name, "reg.exe", ["delete", WINLOGON, "/v", "AutoLogonCount", "/f"])
+    say(f"  autologon geri yazıldı ({user})")
+    return True
+
+
+def ensure_console_session(name: str, workdir: Path) -> bool:
+    """Make sure somebody is logged in at the console, repairing it if not.
+
+    THE SESSION IS NOT A PRECONDITION THAT HOLDS ONCE. It held at the start of
+    this round and was gone ninety seconds later: installing the display driver
+    logged the user off (Winlogon 7002, no reboot -- the boot time never moved),
+    and OOBE's cleanup took the autologon values with it. So the check belongs
+    immediately before the step that needs a session, not once at the top, and
+    it has to be able to put one back.
+    """
+    users = console_users(name)
+    if users:
+        return True
+    say("konsol oturumu yok -- autologon onarılıp yeniden başlatılacak")
+    if not repair_autologon(name):
+        return False
+    if not reboot_and_wait(name, workdir, 10):
+        return False
+    deadline = time.time() + 300
+    while time.time() < deadline:
+        users = console_users(name)
+        if users:
+            say(f"konsol oturumu geri geldi ({', '.join(users)})")
+            return True
+        time.sleep(5)
+    say("konsol oturumu yeniden başlatmadan sonra da açılmadı")
     return False
 
 
@@ -658,15 +787,20 @@ def choose_gpu(name: str) -> str | None:
     for a in adapters:
         say(f"  bağdaştırıcı: {a.get('Name')}  [{a.get('PNPDeviceID')}]")
 
-    candidates = [a for a in adapters
-                  if QXL_HWID not in (a.get("PNPDeviceID") or "").upper()
-                  and not (a.get("PNPDeviceID") or "").upper().startswith("ROOT\\")]
+    # VDD's own adapter is discounted first, and that is what makes a second run
+    # behave like the first: after step 1 the guest has one more display adapter
+    # than it started with, and counting it would leave the round unable to
+    # answer a question it answered ten minutes earlier.
+    real = [a for a in adapters
+            if not (a.get("PNPDeviceID") or "").upper().startswith("ROOT\\")]
+    candidates = [a for a in real
+                  if QXL_HWID not in (a.get("PNPDeviceID") or "").upper()]
     if len(candidates) == 1:
         return candidates[0].get("Name")
     if not candidates:
-        if len(adapters) == 1:
+        if len(real) == 1:
             say("  devredilmiş kart yok -- kartsız prova, tek bağdaştırıcı seçiliyor")
-            return adapters[0].get("Name")
+            return real[0].get("Name")
         say("  devredilmiş kart yok ve birden çok bağdaştırıcı var")
         return None
     say(f"  {len(candidates)} aday var -- tahmin edilmez, --gpu-name ile ver")
@@ -728,15 +862,20 @@ def guest_setup(a, name: str) -> int:
     The one retry is deliberate and bounded: an indirect display driver that has
     installed cleanly sometimes needs the boot to enumerate, so a missing
     monitor is worth exactly one reboot before it counts as a failure.
+
+    AND THE CONSOLE SESSION IS CHECKED TWICE, not once. Installing the display
+    driver logs the console user off -- measured, and it takes the autologon
+    values with it -- so a session that was there when the round started can be
+    gone by the time the step that needs it runs.
     """
     if not agent_ping(name):
         die(f"'{name}' ajanı yanıt vermiyor -- önce build")
 
-    users = console_users(name)
-    if not users:
-        die("misafirde açık konsol oturumu yok -- display-layout ekrana "
-            f"ulaşamaz. Önce: {sys.argv[0]} --name {name} autologon")
-    say(f"konsol oturumu: {', '.join(users)}")
+    workdir = IMAGES / f"{name}-unattend"
+    workdir.mkdir(parents=True, exist_ok=True)
+    if not ensure_console_session(name, workdir):
+        die("misafirde konsol oturumu açılamadı -- display-layout ekrana "
+            f"ulaşamaz. Elle: {sys.argv[0]} --name {name} autologon")
 
     # mkdir exits 1 on a directory that already exists, which is the state we
     # want; only silence from the agent is a failure worth stopping for.
@@ -756,8 +895,6 @@ def guest_setup(a, name: str) -> int:
     monitor = vdd_monitor(name)
     if monitor is None:
         say("VDD ekranı görünmüyor -- bir kez yeniden başlatılıp tekrar bakılacak")
-        workdir = IMAGES / f"{name}-unattend"
-        workdir.mkdir(parents=True, exist_ok=True)
         if not reboot_and_wait(name, workdir, 10):
             say("ADIM DÜŞTÜ -- yeniden başlatma doğrulanamadı.")
             return 1
@@ -777,7 +914,12 @@ def guest_setup(a, name: str) -> int:
         return 1
     say(f"LG host servisi: {running[0].get('Name')} çalışıyor")
 
-    # 3. one display
+    # 3. one display -- and the session is re-checked here rather than trusted
+    # from the top of the round, because installing the driver above is what
+    # took the last one away.
+    if not ensure_console_session(name, workdir):
+        say("ADIM DÜŞTÜ -- ekran topolojisi için konsol oturumu yok.")
+        return 1
     if not run_guest_script(name, WINDOWS / "display-layout.ps1", [], timeout=600):
         say("ADIM DÜŞTÜ -- ekran topolojisi kurulamadı.")
         say(f"  geri alma: misafirde {GUEST_DIR}\\display-layout.ps1 -Reattach")
@@ -858,7 +1000,10 @@ def cmd_build(a):
     say(f"disk imajı: {disk} ({a.size}, seyrek)")
 
     # 4. define
+    qemu_ns, ivshmem = ivshmem_parts()
     dom_xml = render(TEMPLATES / "domain.xml", {
+        "QEMU_NS": qemu_ns,
+        "IVSHMEM": ivshmem,
         "NAME": a.name,
         "MEMORY_KIB": a.memory * 1024,
         "VCPU": a.vcpu,
@@ -878,7 +1023,7 @@ def cmd_build(a):
     say(f"domain tanımlandı: {a.name}")
 
     # 5. run it
-    guard_single_card(a.name)
+    guard_exclusive_devices(a.name)
     virsh("start", a.name, capture=False)
     press_enter_past_the_cd_prompt(a.name, a.enter_seconds)
 

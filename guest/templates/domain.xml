@@ -15,22 +15,31 @@
       a <hostdev> gets added.
 
   WHAT IS DELIBERATELY MISSING, AND WHY. This domain does not passthrough the
-  dGPU and carries no kvmfr/ivshmem block. The question this round answers is
-  "does autounattend.xml produce a booted guest with a reachable agent" — the
-  card has nothing to do with it. Leaving it out means the round costs no
-  handover, cannot disturb win11's card, and can run while the desktop is live
-  instead of from a plain VT. The <hostdev> pair and the Looking Glass plumbing
-  are added once the install itself is boring.
+  dGPU. The question this round answers is "does autounattend.xml produce a
+  booted guest with a reachable agent, and do the three guest scripts run on
+  it" — the card has nothing to do with either. Leaving it out means the round
+  costs no handover, cannot disturb win11's card, and runs while the desktop is
+  live instead of from a plain VT. The <hostdev> pair is added last, so that
+  the cardful round differs from this one by exactly one thing.
+
+  THE KVMFR BLOCK IS NOT IN THAT CATEGORY, AND THAT IS THE POINT. Shared memory
+  is host-side and has nothing to do with the card, so tying it to the hostdev
+  pair would weld two independent variables together: looking-glass.ps1 refuses
+  to install without an ivshmem device, and every debugging round for it would
+  then need a plain VT and cost the desktop. It is written only when the host
+  actually has /dev/kvmfr0, and its size is read from the host's own
+  modprobe.d — a size that disagrees with static_size_mb is a client that
+  attaches and shows nothing.
 
   The watchdog is out for the same reason: one fewer way for a 25-minute
   unattended run to end in a reset nobody watched.
 
   BOTH DOMAINS MUST NEVER RUN AT ONCE once the hostdev pair does get added —
   one card. Today they can, because this one does not claim it. build.py refuses
-  the clash itself (guard_single_card) rather than leaving it to libvirt, whose
+  the clash itself (guard_exclusive_devices) rather than leaving it to libvirt, whose
   refusal to start says nothing about which guest is holding what.
 -->
-<domain type='kvm'>
+<domain type='kvm'@@QEMU_NS@@>
   <name>@@NAME@@</name>
   <metadata>
     <libosinfo:libosinfo xmlns:libosinfo="http://libosinfo.org/xmlns/libvirt/domain/1.0">
@@ -181,4 +190,4 @@
 
     <memballoon model='none'/>
   </devices>
-</domain>
+@@IVSHMEM@@</domain>
