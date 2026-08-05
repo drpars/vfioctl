@@ -1424,9 +1424,9 @@ def guest_setup(a, name: str) -> int:
 
     # 1. VDD
     vdd_args = ["-GpuName", gpu]
-    mode = vdd_mode()
-    if mode:
-        vdd_args += ["-Width", str(mode[0]), "-Height", str(mode[1])]
+    wanted = vdd_mode()
+    if wanted:
+        vdd_args += ["-Width", str(wanted[0]), "-Height", str(wanted[1])]
     if not run_guest_script(name, WINDOWS / "vdd.ps1", vdd_args, timeout=900):
         return 1
     monitor = vdd_monitor(name)
@@ -1496,12 +1496,42 @@ def guest_setup(a, name: str) -> int:
     # for -- at what resolution, and on which card.
     print()
     say("Sonuç ölçümü")
-    for mode in display_modes(name):
+    driving = display_modes(name)
+    for mode in driving:
         width = mode.get("CurrentHorizontalResolution")
         pixels = (f"{width}x{mode.get('CurrentVerticalResolution')} @ "
                   f"{mode.get('CurrentRefreshRate')} Hz" if width
                   else "mod yok (hiçbir ekranı sürmüyor)")
         say(f"  {mode.get('Name')}: {pixels}")
+
+    # THE NUMBER WAS ALREADY READ HERE AND CALLED THE ACCEPTANCE NUMBER (see
+    # display_modes) -- it simply was not compared to the one that was asked for.
+    # Printing it makes a reader responsible for noticing; comparing it makes the
+    # tool responsible, and this is the number the host sized its shared window
+    # for. A guest driving MORE pixels than the window holds is the failure this
+    # whole path exists to prevent, and it reaches the operator as "no picture".
+    #
+    # WHY A MISMATCH IS POSSIBLE AT ALL, and what is not known about it: vdd.ps1
+    # writes vdd_settings.xml and then installs the driver, so a first run cannot
+    # disagree with itself. A LATER run with a different mode -- a second machine,
+    # a panel swap -- rewrites the file against a driver that is already there,
+    # and whether VDD picks that up without a restart HAS NOT BEEN MEASURED. It
+    # has never had to: on this machine the measured mode equals the one the
+    # guest already runs (verified against the live guest, 2560x1440). So the
+    # check exists to make that day loud rather than to predict it.
+    if wanted and not any(
+            (mode.get("CurrentHorizontalResolution"),
+             mode.get("CurrentVerticalResolution")) == wanted
+            for mode in driving):
+        say(f"ADIM DÜŞTÜ -- istenen {wanted[0]}x{wanted[1]} hiçbir "
+            "bağdaştırıcıda yürürlükte değil (yukarıdaki ölçüm).")
+        say("  Bu sayı kvmfr penceresinin boyutlandırıldığı sayı; misafir daha "
+            "büyük bir modu sürüyorsa kare pencereye sığmaz ve istemci bağlanıp "
+            "hiç kare almaz.")
+        say("  Muhtemel sebep ÖLÇÜLMEDİ: VDD ayar dosyasını sürücü kurulumunda "
+            "okuyor olabilir, yani değişen bir mod yeniden başlatma isteyebilir. "
+            f"Denenecek: virsh -c {URI} reboot {name}, sonra setup tekrar.")
+        return 1
 
     log = lg_host_log(name)
     lines, captures = lg_capture_device(name, gpu, log=log)
