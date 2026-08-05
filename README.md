@@ -103,6 +103,10 @@ düzenler. Sorusu şu — *bu makine hâlâ kurduğumuz şey mi?*
 ./vfioctl selftest --rounds 1    # hızlı bakış
 ```
 
+Bu makinede ölçüldü (2026-08-05): **5/5 tur temiz, 3 dk 9 sn**, yoklayıcı
+boyunca canlı (waybar +203 jiffies), hook beklemesi her turda 0, journal'da tek
+bir `non-zero usage count` yok. Misafir her turda 15–20 sn'de ayağa kalktı.
+
 **Düz bir VT'den (Ctrl+Alt+F3) ya da başka bir makineden ssh ile koşulur** —
 aradığı arıza grafik oturumunu öldüren arızadır, o oturumun içindeki bir kabuk
 onunla birlikte ölür. Çıktı `/tmp/vfioctl-selftest.log`'a da yazılır, sonuç bu
