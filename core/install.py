@@ -574,9 +574,26 @@ def uninstall(profile_name: str | None = None, kvmfr_mb: int | None = None) -> i
         remove_rc, removed = sysfile.sudo_remove(m.path)
         rc |= remove_rc
         removed_any |= removed
-    # The hook's own backup lives outside qemu.d/ and is ours; leaving it would
-    # be leaving a copy of the thing just removed.
-    rc |= sysfile.sudo_remove(hostfiles.HOOK_BACKUP)[0]
+
+    # BACKUPS ARE LISTED, NEVER DELETED, AND THE RULE IS ONE SENTENCE: a .bak
+    # is not ours. It is a snapshot of whatever was at that path before this
+    # tool first wrote there -- on a machine that had a setup from something
+    # else, it is the only remaining copy of it, and the file it belonged to
+    # has just been deleted. So removing them would be the one destructive
+    # thing in a command whose whole job is to undo.
+    #
+    # Naming them is not optional either. An unexplained .bak in /etc/udev is
+    # exactly the leftover that makes the next reader think the tool half-ran.
+    # Measured 2026-08-05: an earlier version deleted the hook's backup and
+    # silently left six others.
+    leftovers = [
+        path for path in (
+            [m.backup or m.path.with_suffix(m.path.suffix + ".bak") for m in files]
+            + [hostfiles.HOOK_BACKUP,
+               hostfiles.QEMU_CONF.with_suffix(
+                   hostfiles.QEMU_CONF.suffix + ".bak")]
+        ) if path.exists()
+    ]
 
     _say("libvirt cgroup ACL")
     text = sysfile.read_text(hostfiles.QEMU_CONF)
@@ -611,6 +628,15 @@ def uninstall(profile_name: str | None = None, kvmfr_mb: int | None = None) -> i
             ["sudo", "udevadm", "trigger", "--settle", "--subsystem-match=drm"])
         _say("libvirtd")
         rc |= sysfile.run(["sudo", "systemctl", "try-restart", "libvirtd.service"])
+
+    if leftovers:
+        _say("Bırakılan yedekler — silinmedi, bilerek")
+        for path in leftovers:
+            print(f"      {path}")
+        print("      Bunlar vfioctl'in değil: her biri, o yola vfioctl ilk kez "
+              "yazmadan önce orada ne varsa onun kopyası.")
+        print("      İşlevsel etkileri yok (udev yalnızca *.rules, Xorg *.conf, "
+              "modprobe.d *.conf okur). Elle silinebilirler.")
 
     print()
     print("Kart bu oturumda vfio-pci'ye bağlı değilse zaten nvidia'da; kvmfr "
