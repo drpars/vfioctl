@@ -27,6 +27,7 @@ from pathlib import Path
 PCI_DEVICES = Path("/sys/bus/pci/devices")
 IOMMU_GROUPS = Path("/sys/kernel/iommu_groups")
 DMI = Path("/sys/class/dmi/id")
+DRM_CLASS = Path("/sys/class/drm")
 
 # PCI class prefixes. 0x0300 is a VGA controller, 0x0403 the HDA audio function
 # that shares an IOMMU group with a discrete GPU -- handing over one without the
@@ -149,6 +150,29 @@ def read_machine() -> Machine:
         kvm=Path("/dev/kvm").exists(),
         devices=pci_devices(),
     )
+
+
+def card_of(address: str) -> str | None:
+    """The DRM card node of a PCI device, if it has one at this moment.
+
+    The discrete card has none while a guest owns it, which is a normal state
+    rather than a failure -- and the reason nothing here keys off card numbers.
+    Connector directories (card0-DP-6) match the same glob but resolve to their
+    card, not to a PCI address, so they cannot be mistaken for one.
+    """
+    for card in sorted(DRM_CLASS.glob("card[0-9]*")):
+        device = card / "device"
+        if device.exists() and os.path.basename(os.path.realpath(device)) == address:
+            return card.name
+    return None
+
+
+def driver_of(address: str) -> str:
+    """The driver bound to a PCI device right now, or "(none)"."""
+    link = PCI_DEVICES / address / "driver"
+    if link.is_symlink():
+        return os.path.basename(os.path.realpath(link))
+    return "(none)"
 
 
 def read_sysfs_value(path: str) -> str | None:

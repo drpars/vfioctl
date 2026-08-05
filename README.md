@@ -33,13 +33,39 @@ Bunun bir vaat değil bir **kapı** olması tasarımın parçası:
   yarı çalışan bir passthrough kurulumu, hiç kurulmamış olmaktan kötüdür.
 
 Kapsam dışı: tek GPU'lu makineler (host ekranını kaybeden **başka** bir
-tasarım), AMD dGPU'ların reset bug'ı, Hyprland dışı compositor'lar.
+tasarım), AMD dGPU'ların reset bug'ı.
+
+### Seans yarısı: yazılmaz, ölçülür
+
+Kurulumun taşıyıcı koşullarından biri, **grafik oturumunun dGPU'ya hiç
+dokunmaması.** Ölçüt tam olarak şu: devir anında oturumun hiçbir süreci
+dGPU'nun DRM düğümünü (`/dev/dri/card*`) ya da `/dev/nvidia*`'ı açık
+tutmamalı — ve sabitleme compositor **başlamadan önce** kurulmuş olmalı, çünkü
+cihaz seçimi süreç başlarken bir kez okunur.
+
+Bu yarıyı vfioctl **yazmaz**: sahibi kullanıcının kendi masaüstü
+yapılandırmasıdır (bu makinede ayrı bir dotfiles deposu). Ama **ölçer** —
+`doctor` her makinede bakar, ve geçmiyorsa ölçütü ve nereye kurulacağını,
+**neyin ölçülmediğini yazarak** basar.
+
+Ölçülmüş olan: Hyprland (`AQ_DRM_DEVICES`), bu makinede. Ölçülmemiş olan:
+KWin, mutter ve diğerleri — KWin'in kendi DRM cihaz seçici değişkeni var
+(`KWIN_DRM_DEVICES`), bu araç onu denemedi. Buna karşılık kurulumun iki
+parçası compositor'den bağımsız: dGPU'nun DRM düğümünü seat envanterinden
+çıkaran udev kuralı **logind** üzerinden çalışır (mekanizma compositor'ün
+değil), ve seans değişkenlerinin dördünün üçü glvnd + Vulkan loader'ına aittir,
+her masaüstünde aynıdır.
+
+Duruş bu yüzden "yalnızca Hyprland çalışır" değil: **ölçüt söylenir, ölçüm
+kullanıcının makinesinde `doctor` ile yapılır.** Başka bir compositor'de
+çalışacağı vaat edilmiyor; çalışıp çalışmadığını o makinede okumanın yolu var.
 
 ## Bugün ne var
 
 ```
 vfioctl                   # giriş noktası: doctor, profiles, install, uninstall, selftest
 core/                     # probe (makineyi okur) + profile + doctor/gate
+│                         # + session (seans yarısını ölçer, yazmaz)
 │                         # + hostfiles/install (host tarafı) + selftest
 data/50-vfio-handover     # devri yapan libvirt hook'u
 profiles/                 # tanınan makineler, birer .toml
@@ -61,6 +87,13 @@ yumuşak ölçütleri tek tek raporlar; eşleşmezse donanımı keşfeder ve pro
 yazmaya değip değmeyeceğini söyler. Çıkış kodu: 0 kapı açık, 1 kapalı,
 2 böyle bir profil yok.
 
+Ayrı bir bölüm de **seans yarısını** ölçer: seat0'daki etkin oturum, kartı
+tutan bir süreç olup olmadığı, ve iGPU symlink'i. Bu denetimler **kapıyı
+etkilemez** ve ölçülemediklerinde "geçmedi" değil **"ölçülemedi"** derler —
+kapı makineye bakar (kalıcı soru), seans denetimi ana bakar (her boot değişir).
+Compositor denetimi kapıya konsaydı kapı kendi kendini kilitlerdi: `selftest`
+düz VT'den koşulur, orada ölçülecek compositor yoktur.
+
 **Yeni bir makine eklemek:** `profiles/` altındaki `.toml`'u kopyala, DMI
 dizgelerini ve PCI kimliklerini değiştir, `./vfioctl doctor` koş. Zorunlu olan
 iki şey var — kartın IOMMU grubunda kartından başka bir şey olmaması, ve host'un
@@ -81,7 +114,7 @@ karttan uzak tutan Xorg anahtarı, ve Looking Glass'ın host yarısı (kvmfr'nin
 `cgroup_device_acl`'i — **üretilen değil düzenlenen** tek yer, ve orada
 yalnızca kendi satırına dokunulur.
 
-Üç şey bilerek yapılmıyor:
+Dört şey bilerek yapılmıyor:
 
 - **Paket kurulmaz.** Looking Glass'ın iki yarısı AUR'da; `install` onları
   ölçer ve yoksa komutu basıp durur. Olmayan bir modül için yapılandırma
@@ -90,6 +123,9 @@ yalnızca kendi satırına dokunulur.
   çözer ya da probe eder. Devri libvirt hook'u yapar — tek yazar, bilerek.
 - **`qemu.conf`'un `user`/`group` satırları yazılmaz**, yalnızca raporlanır:
   onların gerekçesi passthrough değil.
+- **Seans yarısı yazılmaz**, ölçülür ve **uyarı** olarak basılır (reddedilmez:
+  compositor kartı tutuyorsa `install` tam da bunun çaresidir — seat kuralı
+  daha bir dakika önce diskte yoktu). → "Seans yarısı: yazılmaz, ölçülür"
 
 `install --check` kalıcı bir araçtır, tek seferlik bir doğrulama değil: `/etc`
 kayar, paket güncellemesi dosya geri koyar, biri gecenin üçünde VT'den kural
@@ -120,6 +156,12 @@ durdurulmuşsa koşmayı reddeder ve her turda onun cpu deltasını basar — s�
 delta turu "sonuç geçersiz" yapar. `--no-poller` bilerek sessiz taban çizgisi
 içindir, kabul turu değildir.
 
+**`selftest` seans yarısının ölçüldüğü yer değildir.** Preflight'ı "compositor
+kartı şu an tutuyor mu" diye bakar ve tutuyorsa turu hiç başlatmaz; ama neyin
+gerektiğini ve nereye kurulacağını söyleyen komut `doctor`. `selftest`'in
+sorusu daha dar ve daha pahalı: gerçek bir devir, gerçek bir misafirle, art
+arda beş kez.
+
 ### Misafir inşası
 
 ```sh
@@ -144,7 +186,7 @@ olduğu — koddan değerli; oralar okunmadan değiştirilmemeli.
 | Faz | İçerik |
 |---|---|
 | 0 | taşınma + iskelet ✅ |
-| 1 | kapı: donanım profili biçimi, `doctor` ✅ |
+| 1 | kapı: donanım profili biçimi, `doctor`, seans yarısının ölçümü ✅ |
 | 2 | host kurulumu: devir hook'u, udev kuralları, Looking Glass host yarısı ✅ ← **buradayız** |
 | 3 | misafir inşasının kalan yarısı: üç PS1 betiğini süren kod |
 | 4 | envanter, ek cihaz devri (Bluetooth, ikinci NVMe) |

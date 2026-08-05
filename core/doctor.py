@@ -19,14 +19,23 @@ hook, defining a domain, moving the card -- calls gate() first. The check
 lives here rather than in each subcommand so there is one answer to "may we
 write on this machine", and so that adding a subcommand cannot accidentally
 skip it.
+
+GATE() LOOKS AT THE MACHINE, session_checks() LOOKS AT THE MOMENT. "Is this
+machine of the class the design works on" is permanent; "is the compositor
+holding the card right now" is not, and changes at the next boot. The second
+question is asked and reported, but never behind the gate -- a compositor
+check inside gate() would lock the gate against the tool's own users, since
+selftest is meant to be run from a plain VT where there is no compositor to
+measure at all.
 """
 
 from __future__ import annotations
 
+import os
 import sys
 from dataclasses import dataclass
 
-from . import probe
+from . import hostfiles, probe, session
 from .profile import Profile
 
 HARD, SOFT = "sert", "yumuşak"
@@ -36,14 +45,17 @@ HARD, SOFT = "sert", "yumuşak"
 class Check:
     key: str
     severity: str
-    ok: bool
+    ok: bool | None          # None = could not be measured, which is not a failure
     title: str
     detail: str = ""
     remedy: str = ""
 
     @property
     def blocking(self) -> bool:
-        return self.severity == HARD and not self.ok
+        # `is False` rather than `not ok`: an unanswerable question must never
+        # close the gate. Saying "failed" where the honest answer is "could not
+        # measure" is how a check earns the habit of being ignored.
+        return self.severity == HARD and self.ok is False
 
 
 # --------------------------------------------------------------------------- #
@@ -87,11 +99,28 @@ def _isolation(gpu: probe.PciDevice, expected: set[str]) -> tuple[bool, str]:
     return True, f"grup {gpu.iommu_group} = yalnızca {', '.join(sorted(members))}"
 
 
+def _cards(machine: probe.Machine,
+           p: Profile | None) -> tuple[probe.PciDevice | None, probe.PciDevice | None]:
+    """(discrete, integrated) as this machine and this profile see them.
+
+    One derivation, used by the checks, by the session section and by anything
+    later that needs to name the two cards -- so a subcommand cannot end up
+    measuring a different pair than the gate allowed.
+    """
+    if p:
+        dgpus, igpus = machine.by_ids(p.dgpu_ids), machine.by_ids(p.igpu_ids)
+        return (dgpus[0] if dgpus else None), (igpus[0] if igpus else None)
+    gpus = machine.gpus()
+    candidates = [g for g in gpus if not g.boot_vga]
+    dgpu = candidates[0] if candidates else None
+    others = [g for g in gpus if dgpu is None or g.address != dgpu.address]
+    return dgpu, (others[0] if others else None)
+
+
 def _checks_with_profile(machine: probe.Machine, p: Profile) -> list[Check]:
     checks = [_check_iommu(), _check_kvm(machine)]
 
-    dgpus = machine.by_ids(p.dgpu_ids)
-    dgpu = dgpus[0] if dgpus else None
+    dgpu, igpu = _cards(machine, p)
     checks.append(Check(
         "dgpu", HARD, dgpu is not None, "dGPU bulundu",
         f"{dgpu.address} [{dgpu.ids}] sürücü={dgpu.driver or '-'}" if dgpu
@@ -119,8 +148,6 @@ def _checks_with_profile(machine: probe.Machine, p: Profile) -> list[Check]:
             f"bu makine {dgpu.subsystem or '-'}, profil {p.dgpu_subsystem or '-'}",
         ))
 
-    igpus = machine.by_ids(p.igpu_ids)
-    igpu = igpus[0] if igpus else None
     checks.append(Check(
         "igpu", HARD, igpu is not None, "iGPU var (host ekranını taşıyacak)",
         f"{igpu.address} [{igpu.ids}] sürücü={igpu.driver or '-'}" if igpu
@@ -162,8 +189,7 @@ def _checks_without_profile(machine: probe.Machine) -> list[Check]:
     checks = [_check_iommu(), _check_kvm(machine)]
 
     gpus = machine.gpus()
-    candidates = [g for g in gpus if not g.boot_vga]
-    dgpu = candidates[0] if candidates else None
+    dgpu, _ = _cards(machine, None)
 
     checks.append(Check(
         "dgpu", HARD, dgpu is not None, "devredilebilecek bir dGPU var",
@@ -188,6 +214,118 @@ def _checks_without_profile(machine: probe.Machine) -> list[Check]:
 
 def run_checks(machine: probe.Machine, p: Profile | None) -> list[Check]:
     return _checks_with_profile(machine, p) if p else _checks_without_profile(machine)
+
+
+# --------------------------------------------------------------------------- #
+# the session half -- reported, never installed, never behind the gate
+# --------------------------------------------------------------------------- #
+
+SESSION_TITLE = "Seans — compositor iGPU'ya sabitlenmiş mi (yumuşak: kapıyı etkilemez)"
+
+
+def session_checks(dgpu: str | None, igpu: str | None) -> list[Check]:
+    """What the graphics session is doing with the card at this moment.
+
+    DELIBERATELY NOT PART OF run_checks(), SO NOT PART OF gate(). See the
+    module docstring: the gate answers a permanent question and this one does
+    not. Every check here is soft, and an unanswerable one returns None rather
+    than False -- from a plain VT, with a guest holding the card, there is
+    simply nothing to read.
+
+    WHY THE TOOL MEASURES THIS AT ALL RATHER THAN INSTALLING IT. The session
+    configuration has a different owner (see core/session.py). Before this
+    existed, install could write all eight files, print "Ölçüm ✓", and the
+    first handover would still fail -- with nothing anywhere saying why until
+    someone ran selftest. That is the project's own "a silent failure must not
+    look like the default" rule, applied to the one condition it was missing.
+    """
+    checks: list[Check] = []
+
+    s = session.active_session()
+    if s is None:
+        checks.append(Check(
+            "seans", SOFT, None, "seat0'ta etkin bir grafik oturumu",
+            "yok — bu makinede ölçülecek bir seans yarısı bulunamadı",
+        ))
+    else:
+        checks.append(Check(
+            "seans", SOFT, True, "seat0'ta etkin bir grafik oturumu",
+            f"oturum {s.id}: {s.desktop or 'masaüstü adı bildirilmemiş'} "
+            f"({s.type or 'tür bilinmiyor'}), lider pid {s.leader or '?'}",
+        ))
+
+    # The pin itself. Everything above is discovery; this is the criterion.
+    dcard = probe.card_of(dgpu) if dgpu else None
+    driver = probe.driver_of(dgpu) if dgpu else "(none)"
+    screens = hostfiles.gpu_screens()
+
+    if dgpu is None:
+        checks.append(Check(
+            "seans-pin", SOFT, None, "dGPU'yu tutan bir şey yok",
+            "dGPU bulunamadı — tutulacak bir kart yok",
+        ))
+    elif driver == "vfio-pci":
+        # The guest owns the device, so of course the session is not holding
+        # it. Reading that as a pass would report the criterion as met on the
+        # one occasion it cannot be tested.
+        checks.append(Check(
+            "seans-pin", SOFT, None, "dGPU'yu tutan bir şey yok",
+            f"{dgpu} şu an vfio-pci'de (misafirde olabilir) — bu durumda "
+            "seans zaten tutamaz, ölçüm anlamlı değil",
+        ))
+    else:
+        held = session.card_holders(dcard)
+        where = f"/dev/dri/{dcard} ya da /dev/nvidia*" if dcard else "/dev/nvidia*"
+        if held:
+            checks.append(Check(
+                "seans-pin", SOFT, False, "dGPU'yu tutan bir şey yok",
+                "TUTULUYOR: " + "; ".join(str(h) for h in held),
+            ))
+        elif screens:
+            # The holder that an unprivileged fd scan cannot see: the display
+            # manager's greeter runs as root. It says so in its own log.
+            checks.append(Check(
+                "seans-pin", SOFT, False, "dGPU'yu tutan bir şey yok",
+                f"koşan Xorg'da {screens} NVIDIA GPU screen var — greeter'ın "
+                "X sunucusu kartı açık tutuyor (20-vfio-no-autoaddgpu.conf "
+                "yerinde değil ya da bu sunucu ondan önce başlamış)",
+            ))
+        else:
+            # No Xorg clause here: a passing result already covers it (a
+            # non-zero screen count is one of the two ways this check fails,
+            # and says so in its own words), and install prints the X server's
+            # own line just above this block.
+            checks.append(Check(
+                "seans-pin", SOFT, True, "dGPU'yu tutan bir şey yok",
+                f"hiçbir süreç {where} tutmuyor",
+            ))
+
+    # The name the session half binds to. vfioctl writes the udev rule; the
+    # compositor config that points at it does not, which is why a missing
+    # link here is a warning rather than a failure -- install writes it.
+    link = hostfiles.DEV_LINK
+    icard = probe.card_of(igpu) if igpu else None
+    if not link.is_symlink():
+        checks.append(Check(
+            "igpu-symlink", SOFT, False, f"{link} iGPU'yu gösteriyor",
+            "yok — `vfioctl install` yazar; seans yarısı bu ada bağlanır",
+        ))
+    else:
+        target = os.path.basename(os.path.realpath(link))
+        if icard is None:
+            checks.append(Check(
+                "igpu-symlink", SOFT, None, f"{link} iGPU'yu gösteriyor",
+                f"→ {target}; iGPU'nun kartı okunamadı, karşılaştırılamıyor",
+            ))
+        else:
+            checks.append(Check(
+                "igpu-symlink", SOFT, target == icard,
+                f"{link} iGPU'yu gösteriyor",
+                f"→ {target}" + ("" if target == icard
+                                 else f", oysa iGPU {igpu} = {icard}"),
+            ))
+
+    return checks
 
 
 # --------------------------------------------------------------------------- #
@@ -221,7 +359,9 @@ def _paint(text: str, code: str) -> str:
 
 
 def _line(c: Check) -> str:
-    if c.ok:
+    if c.ok is None:
+        mark, colour = "?", "36"
+    elif c.ok:
         mark, colour = "✓", "32"
     elif c.severity == SOFT:
         mark, colour = "!", "33"
@@ -257,8 +397,25 @@ def report(profile_name: str | None = None) -> int:
     for c in checks:
         print(_line(c))
 
+    # The session half gets its own section rather than a line in the list
+    # above, because it answers a different kind of question -- what is true
+    # right now, not what this machine is -- and because what it prints when it
+    # does not pass is the point of it.
+    dgpu, igpu = _cards(machine, p)
+    print()
+    print(_paint(SESSION_TITLE, "1"))
+    session_results = session_checks(
+        dgpu.address if dgpu else None, igpu.address if igpu else None)
+    for c in session_results:
+        print(_line(c))
+    if any(c.ok is not True for c in session_results):
+        print()
+        print(session.CRITERION)
+        print()
+        print(session.ADDRESS)
+
     blocking = [c for c in checks if c.blocking]
-    warnings = [c for c in checks if c.severity == SOFT and not c.ok]
+    warnings = [c for c in checks if c.severity == SOFT and c.ok is False]
     print()
 
     if p is None:

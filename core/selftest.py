@@ -49,17 +49,11 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from . import hostfiles, install as install_mod
+from . import hostfiles, install as install_mod, probe, session
 
 LOG = Path("/tmp/vfioctl-selftest.log")
 HOOK_LOG = Path("/var/log/vfio-hook.log")
-DRM_CLASS = Path("/sys/class/drm")
 PROC = Path("/proc")
-
-# Nodes whose open fds keep the nvidia modules loaded. The DRM node is checked
-# separately: a compositor holding it does not let go by itself, so it is a
-# refusal rather than something to wait for.
-_NVIDIA_NODE = re.compile(r"^/dev/nvidia([0-9]+|ctl)$")
 
 
 class Tee:
@@ -143,55 +137,18 @@ def proc_state(pid: str | None) -> str:
     return rest[0] if rest else ""
 
 
-def open_nodes(pid: str | None) -> list[str]:
-    """Every /dev/nvidia* and /dev/dri/* node a process has open."""
-    if not pid:
-        return []
-    found = []
-    fd_dir = PROC / pid / "fd"
-    try:
-        entries = list(fd_dir.iterdir())
-    except OSError:
-        return []
-    for entry in entries:
-        try:
-            target = os.readlink(entry)
-        except OSError:
-            continue
-        if target.startswith("/dev/nvidia") or target.startswith("/dev/dri/"):
-            found.append(target)
-    return sorted(found)
-
-
 def own_card_holders() -> list[str]:
     """"comm(pid)" for processes of this user holding an nvidia char device.
 
     Root-owned holders are invisible here and that is correct: the hook stops
     nvidia-powerd itself before it unloads anything, so waiting for a process
     only the hook can end would never finish.
+
+    The DRM node is deliberately not asked about: a compositor holding it does
+    not let go by itself, so that is a refusal in preflight rather than
+    something this waits for. Hence card_holders(None).
     """
-    held = []
-    for entry in PROC.glob("[0-9]*"):
-        pid = entry.name
-        if pid == str(os.getpid()):
-            continue
-        try:
-            fds = list((entry / "fd").iterdir())
-        except OSError:
-            continue
-        for fd in fds:
-            try:
-                target = os.readlink(fd)
-            except OSError:
-                continue
-            if _NVIDIA_NODE.match(target):
-                try:
-                    comm = (entry / "comm").read_text(encoding="utf-8").strip()
-                except OSError:
-                    comm = "?"
-                held.append(f"{comm}({pid})")
-                break
-    return held
+    return [f"{h.comm}({h.pid})" for h in session.card_holders(None)]
 
 
 # What the kernel and the session say when a handover goes wrong. NVRM lines are
@@ -282,18 +239,21 @@ def preflight(target: Target) -> bool:
     """Every reason not to start the VM, asked before starting it."""
     ok = True
     print("\n== Preflight")
-    print(f"   dGPU  {target.dgpu} → {install_mod.driver_of(target.dgpu)}")
+    print(f"   dGPU  {target.dgpu} → {probe.driver_of(target.dgpu)}")
     if target.dgpu_audio:
         print(f"   ses   {target.dgpu_audio} → "
-              f"{install_mod.driver_of(target.dgpu_audio)}")
+              f"{probe.driver_of(target.dgpu_audio)}")
     print(f"   domain: {_virsh(['domstate', target.domain])[1]}")
 
     comp = pid_of(target.compositor)
     print(f"   {target.compositor} pid: {comp or '(yok)'}")
-    session = os.environ.get("XDG_SESSION_ID", "")
-    if session:
+    # This shell's own session, not seat0's: the question here is whether the
+    # caller is somewhere that survives the compositor dying, which is a
+    # different question from the one core/session.py asks.
+    session_id = os.environ.get("XDG_SESSION_ID", "")
+    if session_id:
         print("   oturum: " + _sh(
-            ["loginctl", "show-session", session, "-p", "Type", "-p", "Seat",
+            ["loginctl", "show-session", session_id, "-p", "Type", "-p", "Seat",
              "-p", "Active"], timeout=10)[1].replace("\n", " "))
 
     # nvidia-smi finds only its own process list, so it cannot answer "who holds
@@ -314,7 +274,7 @@ def preflight(target: Target) -> bool:
     else:
         print(f"   Xorg NVIDIA GPU screen: {screens if screens == 0 else 'okunamadı'}")
 
-    nodes = open_nodes(comp)
+    nodes = session.open_dev_nodes(comp)
     print(f"   {target.compositor} açık dri/nvidia fd'leri: "
           f"{' '.join(sorted(set(nodes))) or '(yok)'}")
     if any(n.startswith("/dev/nvidia") for n in nodes):
@@ -325,7 +285,7 @@ def preflight(target: Target) -> bool:
     # to miss: nvidia-smi says None, no /dev/nvidia* fd exists, and nvidia_drm
     # still sits at refcnt=1. Resolve card* through PCI every time -- the minor
     # numbers are unstable and change across a handover.
-    dcard = install_mod.card_of(target.dgpu)
+    dcard = probe.card_of(target.dgpu)
     if dcard is None:
         print("   dGPU KMS düğümü: yok")
     elif f"/dev/dri/{dcard}" in nodes:
@@ -430,7 +390,7 @@ def one_round(target: Target, number: int, comp_before: str | None) -> str:
         verdict = f"start reddedildi: {out}"
     else:
         state = _wait_state(target.domain, "running", 60)
-        driver = install_mod.driver_of(target.dgpu)
+        driver = probe.driver_of(target.dgpu)
         comp_now = pid_of(target.compositor)
         print(f"   kart={driver} domain={state} {target.compositor}={comp_now}")
         if driver != "vfio-pci":
@@ -460,7 +420,7 @@ def one_round(target: Target, number: int, comp_before: str | None) -> str:
     _virsh(["shutdown", target.domain], timeout=60)
     state = _wait_state(target.domain, "shut off", target.shutdown_timeout)
     time.sleep(5)
-    driver = install_mod.driver_of(target.dgpu)
+    driver = probe.driver_of(target.dgpu)
     comp_now = pid_of(target.compositor)
     print(f"   kart={driver} domain={state} {target.compositor}={comp_now}")
     if state != "shut off":
@@ -510,7 +470,7 @@ def run(rounds: int = 5, domain: str = "win11", compositor: str = "Hyprland",
     after a kernel upgrade or when the card is behaving oddly, and asking it
     should never cost a VM boot or take the desktop's GPU away.
     """
-    from . import doctor, probe
+    from . import doctor
 
     sys.stdout = Tee(LOG)  # type: ignore[assignment]
 
@@ -566,7 +526,7 @@ def run(rounds: int = 5, domain: str = "win11", compositor: str = "Hyprland",
     # session dies mid-run this line is how the reader finds what happened.
     print(f"\n\n########## {_now()}  {rounds} tur  profil={p.name}")
     print(f"günlük (paylaşılacak tek dosya): {LOG}")
-    print(f"kart: {install_mod.driver_of(layout.dgpu)}   "
+    print(f"kart: {probe.driver_of(layout.dgpu)}   "
           f"domain: {_virsh(['domstate', domain])[1]}   "
           f"{compositor}: {comp_before}")
     print(f"yoklayıcı: {poller or '(yok)'} pid={poller_pid or '-'} "
@@ -597,7 +557,7 @@ def run(rounds: int = 5, domain: str = "win11", compositor: str = "Hyprland",
     print(f"\n\n=== ÖZET  {_now()}")
     for number, verdict, delta in results:
         print(f"   tur {number}: {verdict or 'ok':<52} yoklayıcı cpu: +{delta}")
-    print(f"\n   kart: {install_mod.driver_of(layout.dgpu)}   "
+    print(f"\n   kart: {probe.driver_of(layout.dgpu)}   "
           f"domain: {_virsh(['domstate', domain])[1]}   "
           f"{compositor}: {pid_of(compositor)} (baştaki {comp_before})")
     if poller:

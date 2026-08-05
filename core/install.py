@@ -111,19 +111,6 @@ def resolve(machine: probe.Machine, p: Profile) -> Layout | None:
 # reading the results back
 # --------------------------------------------------------------------------- #
 
-def card_of(address: str) -> str | None:
-    """The DRM card node of a PCI device, if it has one at this moment.
-
-    The discrete card has none while a guest owns it, which is a normal state
-    rather than a failure -- and the reason nothing here keys off card numbers.
-    """
-    for card in sorted(DRM_CLASS.glob("card[0-9]*")):
-        device = card / "device"
-        if device.exists() and os.path.basename(os.path.realpath(device)) == address:
-            return card.name
-    return None
-
-
 def current_tags(card: str) -> list[str] | None:
     """Tags udev has on a DRM card right now; None if they cannot be read.
 
@@ -178,13 +165,6 @@ def kvmfr_loaded_mb() -> int | None:
         return None
     finally:
         os.close(fd)
-
-
-def driver_of(address: str) -> str:
-    link = PCI_DEVICES / address / "driver"
-    if link.is_symlink():
-        return os.path.basename(os.path.realpath(link))
-    return "(none)"
 
 
 def qemu_user_group() -> tuple[str | None, str | None]:
@@ -376,11 +356,11 @@ def verify(layout: Layout, wanted_mb: int | None = None) -> int:
         _bad(f"{hostfiles.DEV_LINK} yok — kural diskte ama udev uygulamadı")
         rc |= 1
 
-    dcard = card_of(layout.dgpu)
+    dcard = probe.card_of(layout.dgpu)
     if dcard is None:
         # No KMS node to measure: the card is on vfio-pci, or nvidia_drm is not
         # loaded. The rule is on disk and applies when the node next appears.
-        _warn(f"dGPU'nun KMS düğümü şu an yok (sürücü: {driver_of(layout.dgpu)}) "
+        _warn(f"dGPU'nun KMS düğümü şu an yok (sürücü: {probe.driver_of(layout.dgpu)}) "
               "— kural diskte, düğüm doğduğunda uygulanır")
     else:
         tags = current_tags(dcard)
@@ -396,7 +376,7 @@ def verify(layout: Layout, wanted_mb: int | None = None) -> int:
 
     # The other half of the claim, and the one that costs a login screen if it
     # is wrong: seat0 still has a card carrying master-of-seat.
-    icard = card_of(layout.igpu)
+    icard = probe.card_of(layout.igpu)
     itags = current_tags(icard) if icard else None
     if itags is None:
         _warn("iGPU'nun etiketleri okunamadı")
@@ -414,6 +394,21 @@ def verify(layout: Layout, wanted_mb: int | None = None) -> int:
     else:
         _warn(f"koşan Xorg'da {screens} NVIDIA GPU screen var — dosya yerinde "
               "ama bu sunucu ondan önce başlamış; yeniden başlatmada düşer")
+
+    # THE SESSION HALF: WARNED ABOUT, NOT REFUSED. It is not this tool's to
+    # write (core/session.py says why), so it is measured here the same way
+    # the running X server above is. Refusing would be backwards: a compositor
+    # holding the card right now is usually what this very install fixes --
+    # until a moment ago the seat rule was not on disk. The symlink check is
+    # skipped because the block at the top of this function already read that
+    # file, which is one vfioctl writes.
+    session_results = [c for c in doctor.session_checks(layout.dgpu, layout.igpu)
+                       if c.key != "igpu-symlink"]
+    for c in session_results:
+        text = f"{c.title}: {c.detail}" if c.detail else c.title
+        (_ok if c.ok is True else _warn)(text)
+    if any(c.ok is not True for c in session_results):
+        print("      Ölçüt ve nereye kurulacağı: `vfioctl doctor`")
 
     if kvmfr_is_device():
         loaded = kvmfr_loaded_mb()
@@ -439,7 +434,7 @@ def verify(layout: Layout, wanted_mb: int | None = None) -> int:
           "(bu araç yazmaz, yalnızca bildirir)")
 
     for address in layout.group_members:
-        print(f"      {address} → {driver_of(address)}")
+        print(f"      {address} → {probe.driver_of(address)}")
     return rc
 
 
@@ -557,7 +552,7 @@ def uninstall(profile_name: str | None = None, kvmfr_mb: int | None = None) -> i
         print("Adresler çözülemedi. vfioctl doctor")
         return 1
 
-    on_vfio = [a for a in layout.group_members if driver_of(a) == "vfio-pci"]
+    on_vfio = [a for a in layout.group_members if probe.driver_of(a) == "vfio-pci"]
     if on_vfio:
         _bad("kart şu an vfio-pci'de (" + " ".join(on_vfio) + ") — misafir "
              "çalışıyor olabilir. Önce misafiri kapatın.")
@@ -619,7 +614,7 @@ def uninstall(profile_name: str | None = None, kvmfr_mb: int | None = None) -> i
             # through tee rather than a shell redirect so no path is ever
             # handed to a shell.
             rc |= sysfile.sudo_write(override, "\n")
-        print(f"      {address} → {driver_of(address)}")
+        print(f"      {address} → {probe.driver_of(address)}")
 
     if removed_any:
         _say("udev")
