@@ -1,0 +1,65 @@
+#!/usr/bin/env python3
+"""vfioctl -- install, check and drive a VFIO GPU passthrough setup.
+
+    ./vfioctl doctor              # what is this machine, and may we write here
+    ./vfioctl doctor --profile X  # check against a named profile instead
+    ./vfioctl profiles            # which machines this tool claims
+
+WHAT IS HERE TODAY. The gate, and only the gate. Everything that writes --
+installing the handover hook and the udev rules, defining a domain, moving the
+card -- lands in later phases and every one of them calls doctor.gate() first.
+The order is on purpose: the gate is written before the things it guards, so
+that no subcommand can ever have existed without one.
+
+THE GUEST BUILD IS STILL ITS OWN ENTRY POINT (guest/build.py). It predates this
+command and folds in when the guest side is finished; wiring it in now would
+mean designing that subcommand twice.
+"""
+
+from __future__ import annotations
+
+import argparse
+import sys
+
+from core import doctor, profile as profile_mod
+
+
+def cmd_doctor(args) -> int:
+    return doctor.report(args.profile)
+
+
+def cmd_profiles(args) -> int:
+    profiles = profile_mod.all_profiles()
+    if not profiles:
+        print("Hiç profil yok.")
+        return 1
+    for p in profiles:
+        print(f"{p.name}\n  {p.title}")
+        for product in p.dmi_products:
+            print(f"  DMI: {product}")
+    return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        prog="vfioctl",
+        description="VFIO GPU passthrough kurulumunu kur, ölç ve sür",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__,
+    )
+    sub = parser.add_subparsers(dest="cmd", required=True)
+
+    d = sub.add_parser("doctor", help="makineyi ölç, hiçbir şey yazma")
+    d.add_argument("--profile", default=None,
+                   help="DMI ile seçmek yerine adı verilen profile karşı ölç")
+    d.set_defaults(func=cmd_doctor)
+
+    pl = sub.add_parser("profiles", help="tanınan makineleri listele")
+    pl.set_defaults(func=cmd_profiles)
+
+    args = parser.parse_args()
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

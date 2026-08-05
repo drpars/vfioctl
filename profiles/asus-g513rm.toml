@@ -1,0 +1,53 @@
+# ASUS ROG Strix G513RM -- the machine this tool was written on.
+#
+# Every value here was measured on the machine, not read off a spec sheet. The
+# handover has run five rounds in a row on it with a live probe running, which
+# is what "supported" means for this project: not that it booted once.
+#
+# WRITING A PROFILE FOR ANOTHER MACHINE. Copy this file, change the DMI strings
+# and the PCI ids, and run `vfioctl doctor`. It reports what does not match
+# without writing anything. What must hold is in [dgpu] and [igpu]: the card's
+# IOMMU group has to contain the card and nothing else, and there has to be a
+# second GPU left to keep the host's display alive. Neither is negotiable --
+# the first hands a stranger's device to the guest, the second leaves the host
+# with no screen.
+
+name = "asus-g513rm"
+title = "ASUS ROG Strix G513RM (Ryzen 6800H + RTX 3060 Mobile)"
+
+notes = """
+Bu makinede bilinen bedel: dGPU'nun DP çıkışındaki harici ekran, ortam
+değişkenleri dGPU'yu dışladığı için ana makine tarafından sürülemez. Kabul
+edilmiş bir karar (K6); PRIME offload etkilenmiyor.
+"""
+
+[machine]
+dmi_vendor = "ASUSTeK COMPUTER INC."
+dmi_products = ["ROG Strix G513RM_G513RM"]
+
+# The card to hand over. Matched by vendor:device rather than by PCI address,
+# so a second machine of the same model matches without editing.
+[dgpu]
+ids = ["10de:2520"]          # NVIDIA GA106M, RTX 3060 Mobile
+audio_ids = ["10de:228e"]    # its HDA function, same IOMMU group
+subsystem = "1043:1b7c"      # soft: the ASUS variant of the board
+
+# The card that must stay behind. Without one, handing over the dGPU takes the
+# host's display with it -- a different design, and out of scope for v1.
+[igpu]
+ids = ["1002:1681"]          # AMD Rembrandt, Radeon 680M
+
+# The panel-routing switch. On this laptop mode 1 is Optimus, which keeps the
+# internal panel on the iGPU; mode 0 (Ultimate/discrete) wires the panel to the
+# dGPU, and then a handover takes the screen with the card. Measured, not
+# tested: switching needs a reboot, so the failure would look like "one morning
+# everything broke" rather than like a handover problem.
+[mux]
+sysfs = "/sys/devices/platform/asus-nb-wmi/gpu_mux_mode"
+required = 1
+meaning = "Optimus -- dahili panel iGPU'da"
+
+# Expectations, not requirements. A kernel upgrade must not stop the tool on
+# the machine it was written for.
+[soft]
+kernel_flavour = "g14"

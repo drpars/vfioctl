@@ -5,10 +5,10 @@ VFIO passthrough kurulumunu kuran, ölçen ve süren CLI aracı.
 🇬🇧 CLI tool that installs, checks and drives a VFIO passthrough setup which
 hands a laptop's discrete GPU to a Windows guest.
 
-> **Durum: yapım aşamasında.** Bugün burada yalnızca **misafir inşası** var
-> (`guest/`). Host tarafı — devir hook'u, udev kuralları, Looking Glass'ın host
-> yarısı — hâlâ [archsetup](https://github.com/drpars/archsetup) içinde ve
-> buraya taşınacak. `vfioctl` diye çalıştırılabilir bir komut henüz **yok**.
+> **Durum: yapım aşamasında.** Bugün burada **donanım kapısı** (`vfioctl
+> doctor`) ve **misafir inşası** (`guest/`) var. Host tarafı — devir hook'u,
+> udev kuralları, Looking Glass'ın host yarısı — hâlâ
+> [archsetup](https://github.com/drpars/archsetup) içinde ve buraya taşınacak.
 
 ## Neden ayrı bir proje
 
@@ -38,11 +38,33 @@ tasarım), AMD dGPU'ların reset bug'ı, Hyprland dışı compositor'lar.
 ## Bugün ne var
 
 ```
+vfioctl                   # giriş noktası: doctor, profiles
+core/                     # probe (makineyi okur) + profile + doctor/gate
+profiles/                 # tanınan makineler, birer .toml
 guest/
 ├── build.py              # boş diskten konsol oturumu açık Windows'a, gözetimsiz
 ├── templates/            # autounattend.xml, domain.xml, SetupComplete.cmd
 └── windows/              # misafirde SYSTEM olarak koşan kurulum betikleri
 ```
+
+### Kapı
+
+```sh
+./vfioctl doctor          # bu makine ne, ve buraya yazabilir miyiz
+./vfioctl profiles        # hangi makineleri üstleniyoruz
+```
+
+`doctor` hiçbir şey yazmaz ve **her makinede** koşar. Profil eşleşirse sert ve
+yumuşak ölçütleri tek tek raporlar; eşleşmezse donanımı keşfeder ve profil
+yazmaya değip değmeyeceğini söyler. Çıkış kodu: 0 kapı açık, 1 kapalı,
+2 böyle bir profil yok.
+
+**Yeni bir makine eklemek:** `profiles/` altındaki `.toml`'u kopyala, DMI
+dizgelerini ve PCI kimliklerini değiştir, `./vfioctl doctor` koş. Zorunlu olan
+iki şey var — kartın IOMMU grubunda kartından başka bir şey olmaması, ve host'un
+ekranını taşıyacak ikinci bir GPU bulunması.
+
+### Misafir inşası
 
 ```sh
 ./guest/build.py build --user <ad> --password-file <yol>
@@ -65,15 +87,16 @@ olduğu — koddan değerli; oralar okunmadan değiştirilmemeli.
 
 | Faz | İçerik |
 |---|---|
-| 0 | taşınma + iskelet ← **buradayız** |
-| 1 | kapı: donanım profili biçimi, `doctor` |
+| 0 | taşınma + iskelet ✅ |
+| 1 | kapı: donanım profili biçimi, `doctor` ✅ ← **buradayız** |
 | 2 | host kurulumu: devir hook'u, udev kuralları, Looking Glass host yarısı |
 | 3 | misafir inşasının kalan yarısı: üç PS1 betiğini süren kod |
 | 4 | envanter, ek cihaz devri (Bluetooth, ikinci NVMe) |
 
 ## Gereksinimler
 
-`libvirt`, `qemu`, `edk2-ovmf`, `swtpm`, `virtio-win`, `xorriso`, Python 3.11+.
+`libvirt`, `qemu`, `edk2-ovmf`, `swtpm`, `virtio-win`, `xorriso`, Python 3.11+
+(`tomllib` için). Depo dışı bağımlılık yok.
 Windows kurulum ISO'su kullanıcının kendisi tarafından sağlanır — bu depo
 misafire ait hiçbir dosyayı indirmez.
 
