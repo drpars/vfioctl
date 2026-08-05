@@ -1052,6 +1052,19 @@ def _core_lg():
     return lookingglass
 
 
+def _core_hostfiles():
+    """core.hostfiles, imported the same way, and for the same reason.
+
+    It already owns how a display is measured and how big a frame of that size
+    needs its shared window to be -- install sizes kvmfr with exactly these two
+    functions. Asking them here rather than restating them is what keeps the
+    guest's resolution and the host's window from drifting apart.
+    """
+    sys.path.insert(0, str(HERE.parent))
+    from core import hostfiles
+    return hostfiles
+
+
 def lg_host_log(name: str) -> list[str] | None:
     """The guest's own Looking Glass host log, or None when there is none.
 
@@ -1177,6 +1190,61 @@ def choose_gpu(name: str, expect_card: bool = False) -> str | None:
         return None
     say(f"  {len(candidates)} aday var -- tahmin edilmez, --gpu-name ile ver")
     return None
+
+
+def vdd_mode() -> tuple[int, int] | None:
+    """The resolution the guest's virtual display gets -- measured, not written down.
+
+    IT USED TO BE A CONSTANT in vdd.ps1's parameters while the two other places
+    that depend on the same number were already measured: install sizes the
+    kvmfr window from the largest connected display, and the domain's ivshmem
+    size is read back off the host's modprobe.d. A machine-specific value spelled
+    out in the repo is what K9 keeps out, and this was the only one of the three
+    that could go stale on its own -- silently, because a guest at the wrong
+    resolution still boots.
+
+    THE INSTALLED WINDOW BINDS, NOT THE PANEL. The client draws the guest into a
+    window on this machine, so a guest bigger than the largest local display buys
+    nothing; but a guest whose frame does not fit the kvmfr window that is
+    installed *today* is worse than nothing -- the client attaches and no picture
+    ever arrives, which is indistinguishable from a handover that did not work.
+    That window can be smaller than what install would size now: kvmfr takes its
+    size at boot, so a display plugged in afterwards moves largest_mode() and
+    not the window. So the mode is the biggest connected one that still fits.
+
+    None means "say nothing, let the script's own defaults stand": on a host with
+    nothing connected there is no display to measure, and failing there would
+    break a setup run that has no reason to fail.
+    """
+    hostfiles = _core_hostfiles()
+    modes = hostfiles.connected_modes()
+    if not modes:
+        say("  bağlı ekran yok -- VDD çözünürlüğü betiğin varsayılanında kalıyor")
+        return None
+
+    window = kvmfr_size_bytes()
+    if window is None:
+        largest = max(modes, key=lambda mode: mode[0] * mode[1])
+        say(f"  {KVMFR_MODPROBE} okunamadı -- {largest[0]}x{largest[1]} veriliyor, "
+            "pencereye sığdığı doğrulanmadan")
+        return largest
+
+    window_mb = window // (1024 * 1024)
+    fits = [mode for mode in modes
+            if hostfiles.required_mb(*mode) <= window_mb]
+    if not fits:
+        smallest = min(modes, key=lambda mode: mode[0] * mode[1])
+        say(f"  bağlı ekranların en küçüğü bile ({smallest[0]}x{smallest[1]}) "
+            f"{hostfiles.required_mb(*smallest)} MB pencere istiyor, kurulu "
+            f"pencere {window_mb} MB")
+        say("  VDD çözünürlüğü betiğin varsayılanında kalıyor -- pencereyi "
+            "büyütmek: vfioctl install, sonra reboot (kvmfr boot'ta yükleniyor)")
+        return None
+
+    chosen = max(fits, key=lambda mode: mode[0] * mode[1])
+    say(f"  VDD çözünürlüğü: {chosen[0]}x{chosen[1]} "
+        f"({hostfiles.required_mb(*chosen)} MB, kurulu pencere {window_mb} MB)")
+    return chosen
 
 
 def vdd_monitor(name: str) -> dict | None:
@@ -1355,8 +1423,11 @@ def guest_setup(a, name: str) -> int:
     say(f"VDD bağdaştırıcısı: {gpu}")
 
     # 1. VDD
-    if not run_guest_script(name, WINDOWS / "vdd.ps1",
-                            ["-GpuName", gpu], timeout=900):
+    vdd_args = ["-GpuName", gpu]
+    mode = vdd_mode()
+    if mode:
+        vdd_args += ["-Width", str(mode[0]), "-Height", str(mode[1])]
+    if not run_guest_script(name, WINDOWS / "vdd.ps1", vdd_args, timeout=900):
         return 1
     monitor = vdd_monitor(name)
     if monitor is None:

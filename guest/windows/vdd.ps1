@@ -15,8 +15,10 @@
     which pushes it to C:\Users\Public\vfioctl\ and runs it there, then reads
     the guest's monitor inventory back rather than trusting this script's word.
 
-    NOTHING MACHINE-SPECIFIC IS BAKED IN (K9): every URL, hash and the GPU name
-    are parameters. The defaults are what was measured to work on this host.
+    NOTHING MACHINE-SPECIFIC IS BAKED IN (K9): every URL, hash, the GPU name and
+    the resolution are parameters, and the last two are measured in the guest and
+    on the host rather than defaulted to. The defaults are what was measured to
+    work on this host, and they are what a caller that measured nothing gets.
 
     Upstream reference: the project's own Community Scripts/silent-install.ps1.
     This script deviates on purpose in three places:
@@ -46,8 +48,10 @@ param(
     # name exactly; "default" lets Windows choose, which is what we do not want.
     [string]$GpuName = 'NVIDIA GeForce RTX 3060 Laptop GPU',
 
-    # Looking Glass shows the guest on the host's internal panel (2560x1440).
-    # kvmfr is sized 64 MB on the host, which covers 2560x1440 with room to spare.
+    # A FALLBACK, NOT THE ANSWER: setup measures the host's connected displays
+    # and the installed kvmfr window and passes -Width/-Height (build.py's
+    # vdd_mode). These stand only when there is nothing to measure -- a host
+    # with no display connected -- and are this machine's internal panel.
     [int]$Width = 2560,
     [int]$Height = 1440,
     [int]$RefreshRate = 60,
