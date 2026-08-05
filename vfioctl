@@ -2,6 +2,7 @@
 """vfioctl -- install, check and drive a VFIO GPU passthrough setup.
 
     ./vfioctl doctor              # what is this machine, and may we write here
+    ./vfioctl inventory           # what else could move, and what it would cost
     ./vfioctl profiles            # which machines this tool claims
     ./vfioctl install             # write the host-side setup
     ./vfioctl install --check     # compare /etc with what install would write
@@ -40,13 +41,18 @@ import importlib.util
 import sys
 from pathlib import Path
 
-from core import doctor, install as install_mod, profile as profile_mod, selftest
+from core import (doctor, install as install_mod, inventory,
+                  profile as profile_mod, selftest)
 
 HERE = Path(__file__).resolve().parent
 
 
 def cmd_doctor(args) -> int:
     return doctor.report(args.profile)
+
+
+def cmd_inventory(args) -> int:
+    return inventory.report(args.profile)
 
 
 def cmd_profiles(args) -> int:
@@ -148,6 +154,12 @@ def main() -> int:
 
     d = sub.add_parser("doctor", help="makineyi ölç, hiçbir şey yazma")
     d.set_defaults(func=cmd_doctor)
+
+    # No gate: it writes nothing, so like doctor it is useful precisely where
+    # the gate is closed -- what it lists is why.
+    inv = sub.add_parser("inventory", help="devredilebilecek cihazları listele "
+                                           "ve her birinin host'a bedelini söyle")
+    inv.set_defaults(func=cmd_inventory)
 
     pl = sub.add_parser("profiles", help="tanınan makineleri listele")
     pl.set_defaults(func=cmd_profiles)

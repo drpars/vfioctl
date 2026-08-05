@@ -16,11 +16,19 @@ PCI ADDRESSES ARE STABLE, CARD NUMBERS ARE NOT. /dev/dri/card* and connector
 names shuffle between boots on this hardware (measured), so nothing here keys
 off them; every DRM node is resolved back to its PCI address before it is
 named. That trap cost three sessions once.
+
+USB IS READ HERE TOO, BECAUSE IT IS A SECOND KIND OF HANDOVER UNIT. A PCI
+device moves as its whole IOMMU group; a USB device moves on its own, by
+vendor:product, with libvirt doing the detaching. Inventory needs both, and
+the difference between them is the difference between handing over a
+controller and handing over one thing plugged into it -- on this machine the
+Bluetooth radio and the laptop's own keyboard sit on the same controller.
 """
 
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -28,6 +36,9 @@ PCI_DEVICES = Path("/sys/bus/pci/devices")
 IOMMU_GROUPS = Path("/sys/kernel/iommu_groups")
 DMI = Path("/sys/class/dmi/id")
 DRM_CLASS = Path("/sys/class/drm")
+USB_DEVICES = Path("/sys/bus/usb/devices")
+
+PCI_ADDRESS = re.compile(r"^[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-9a-f]$")
 
 # PCI class prefixes. 0x0300 is a VGA controller, 0x0403 the HDA audio function
 # that shares an IOMMU group with a discrete GPU -- handing over one without the
@@ -118,6 +129,117 @@ def iommu_group_members(group: str) -> list[str]:
 
 def iommu_active() -> bool:
     return IOMMU_GROUPS.is_dir() and any(IOMMU_GROUPS.iterdir())
+
+
+# --------------------------------------------------------------------------- #
+# usb
+# --------------------------------------------------------------------------- #
+
+@dataclass
+class UsbInterface:
+    number: str              # 1-4:1.0
+    usb_class: str           # e0
+    driver: str | None       # btusb, usbhid, None
+    inputs: list[str] = field(default_factory=list)   # "Asus Keyboard"
+
+
+@dataclass
+class UsbDevice:
+    name: str                # 1-4 -- the sysfs name, and the bus path
+    vendor: str              # 8087
+    product: str             # 0032
+    description: str | None  # what the device calls itself
+    manufacturer: str | None
+    busnum: int | None
+    devnum: int | None
+    controller: str | None   # PCI address of the xHCI it hangs off
+    interfaces: list[UsbInterface] = field(default_factory=list)
+
+    @property
+    def ids(self) -> str:
+        return f"{self.vendor}:{self.product}"
+
+    @property
+    def drivers(self) -> list[str]:
+        return sorted({i.driver for i in self.interfaces if i.driver})
+
+    @property
+    def inputs(self) -> list[str]:
+        return [name for i in self.interfaces for name in i.inputs]
+
+
+def _pci_parent(path: Path) -> str | None:
+    """The PCI address a sysfs node hangs off, by walking its real path up.
+
+    A USB device's controller is not recorded anywhere as a field; it is the
+    nearest PCI component of the path it lives at. Reading it this way means a
+    machine with the radio on a different controller answers correctly without
+    the tool being told where to look.
+    """
+    for part in reversed(os.path.realpath(path).split("/")):
+        if PCI_ADDRESS.match(part):
+            return part
+    return None
+
+
+def _usb_interfaces(device: Path) -> list[UsbInterface]:
+    out: list[UsbInterface] = []
+    for entry in sorted(device.glob(f"{device.name}:*")):
+        driver = None
+        link = entry / "driver"
+        if link.is_symlink():
+            driver = os.path.basename(os.path.realpath(link))
+        # HID devices nest their input nodes under a hid child rather than
+        # directly under the interface, so this looks at any depth. The names
+        # are what makes a warning readable: "Asus Keyboard" says more about
+        # what the host would lose than the interface class 03 does.
+        inputs = sorted({n for n in (_read(p) for p in entry.glob("**/input/input*/name")) if n})
+        out.append(UsbInterface(
+            number=entry.name,
+            usb_class=(_read(entry / "bInterfaceClass") or "?"),
+            driver=driver,
+            inputs=list(inputs),
+        ))
+    return out
+
+
+def _int(value: str | None) -> int | None:
+    try:
+        return int(value) if value is not None else None
+    except ValueError:
+        return None
+
+
+def usb_devices() -> list[UsbDevice]:
+    """Every USB device that could be handed over, root hubs excluded.
+
+    ROOT HUBS ARE NOT CANDIDATES AND ARE LEFT OUT. usbN is the controller's own
+    hub -- the thing a PCI handover of the xHCI would move, not something
+    libvirt can attach by vendor:product. Listing it beside real devices would
+    invite exactly the confusion this module exists to prevent.
+    """
+    out: list[UsbDevice] = []
+    if not USB_DEVICES.is_dir():
+        return out
+    for entry in sorted(USB_DEVICES.iterdir()):
+        # Interfaces carry a colon; root hubs are named usb1, usb2, ...
+        if ":" in entry.name or entry.name.startswith("usb"):
+            continue
+        vendor, product = _read(entry / "idVendor"), _read(entry / "idProduct")
+        if not (vendor and product):
+            continue
+        out.append(UsbDevice(
+            name=entry.name,
+            vendor=vendor,
+            product=product,
+            description=_read(entry / "product"),
+            manufacturer=_read(entry / "manufacturer"),
+            busnum=_int(_read(entry / "busnum")),
+            devnum=_int(_read(entry / "devnum")),
+            controller=_pci_parent(entry),
+            interfaces=_usb_interfaces(entry),
+        ))
+    return out
 
 
 @dataclass

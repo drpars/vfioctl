@@ -9,7 +9,8 @@ hands a laptop's discrete GPU to a Windows guest.
 > diskten, kartı devredilmiş ve Looking Glass'ın o kart üzerinde yakaladığı bir
 > Windows misafirine kadar her adım burada: **donanım kapısı** (`doctor`),
 > **host kurulumu** (`install` / `uninstall` / `selftest`) ve **misafir inşası
-> + sürülmesi** (`guest/`). Kalan: envanter ve ek cihaz devri (Faz 4).
+> + sürülmesi** (`guest/`). Kalan: ek cihaz devri (Faz 4) — envanteri çıkaran
+> yarısı yazıldı (`inventory`), **devreden yarısı henüz yok.**
 
 ## Neden ayrı bir proje
 
@@ -64,10 +65,11 @@ kullanıcının makinesinde `doctor` ile yapılır.** Başka bir compositor'de
 ## Bugün ne var
 
 ```
-vfioctl                   # TEK giriş noktası: doctor, profiles, install,
-│                         # uninstall, selftest + guest <alt komut>
+vfioctl                   # TEK giriş noktası: doctor, inventory, profiles,
+│                         # install, uninstall, selftest + guest <alt komut>
 core/                     # probe (makineyi okur) + profile + doctor/gate
 │                         # + session (seans yarısını ölçer, yazmaz)
+│                         # + inventory (başka ne devredilebilir, bedeli ne)
 │                         # + hostfiles/install (host tarafı) + selftest
 data/50-vfio-handover     # devri yapan libvirt hook'u
 profiles/                 # tanınan makineler, birer .toml
@@ -101,6 +103,31 @@ düz VT'den koşulur, orada ölçülecek compositor yoktur.
 dizgelerini ve PCI kimliklerini değiştir, `./vfioctl doctor` koş. Zorunlu olan
 iki şey var — kartın IOMMU grubunda kartından başka bir şey olmaması, ve host'un
 ekranını taşıyacak ikinci bir GPU bulunması.
+
+### Envanter — başka ne devredilebilir, ve bedeli ne
+
+```sh
+./vfioctl inventory       # PCI + USB, her cihazın host'a bedeliyle
+```
+
+**Yalnızca rapordur: v1 GPU'dan başka hiçbir cihazı devretmez.** Cevapladığı
+soru "yapılabilir mi" değil — neredeyse her cihaz teknik olarak ayrılabilir —
+**"host ne kaybeder"**. `doctor`'dan ayrı bir komut olması bilerek: `doctor`'ın
+tek bir hükmü var ve otuz satırlık bir döküm onu gömer, üstelik envanter tam da
+kapı **kapalıyken** okunmaya değer, çünkü listelediği şey sebebidir.
+
+**Devir birimi veri yoluna göre değişir, ve ikisini karıştırmak pahalıdır.**
+Bir PCI cihazı bütün IOMMU grubuyla taşınır — grubunda yabancı varsa hiç
+taşınamaz. Bir USB cihazı tek başına, `vendor:product` ile taşınır; ayırmayı
+libvirt yapar. Dolayısıyla üstündeki her şeyi götüren şey *denetleyicidir*,
+cihaz değil: bu makinede Bluetooth radyosu ile dizüstünün kendi klavyesi aynı
+xHCI'da duruyor, yani radyoyu devretmek ucuz, denetleyicisini devretmek klavye
+demek.
+
+Ret ile uyarı ayrımı sabit: **ret veriye ve ekrana dairdir** — host'un bağlı
+olduğu, `fstab`'ında duran ya da takas aldığı bir disk, ve host'un ekranını
+taşıyan kart. Kaybolan bir klavye ya da radyo misafiri kapatınca geri gelir;
+yüksek sesle söylenir, reddedilmez.
 
 ### Host kurulumu
 
