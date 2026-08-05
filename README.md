@@ -5,10 +5,10 @@ VFIO passthrough kurulumunu kuran, ölçen ve süren CLI aracı.
 🇬🇧 CLI tool that installs, checks and drives a VFIO passthrough setup which
 hands a laptop's discrete GPU to a Windows guest.
 
-> **Durum: yapım aşamasında.** Bugün burada **donanım kapısı** (`vfioctl
-> doctor`) ve **misafir inşası** (`guest/`) var. Host tarafı — devir hook'u,
-> udev kuralları, Looking Glass'ın host yarısı — hâlâ
-> [archsetup](https://github.com/drpars/archsetup) içinde ve buraya taşınacak.
+> **Durum: yapım aşamasında.** Bugün burada **donanım kapısı** (`doctor`),
+> **host kurulumu** (`install` / `uninstall` / `selftest`) ve **misafir
+> inşası** (`guest/`) var. Kalan: misafir tarafının üç betiğini süren kod
+> (Faz 3) ve envanter (Faz 4).
 
 ## Neden ayrı bir proje
 
@@ -38,8 +38,10 @@ tasarım), AMD dGPU'ların reset bug'ı, Hyprland dışı compositor'lar.
 ## Bugün ne var
 
 ```
-vfioctl                   # giriş noktası: doctor, profiles
+vfioctl                   # giriş noktası: doctor, profiles, install, uninstall, selftest
 core/                     # probe (makineyi okur) + profile + doctor/gate
+│                         # + hostfiles/install (host tarafı) + selftest
+data/50-vfio-handover     # devri yapan libvirt hook'u
 profiles/                 # tanınan makineler, birer .toml
 guest/
 ├── build.py              # boş diskten konsol oturumu açık Windows'a, gözetimsiz
@@ -63,6 +65,56 @@ yazmaya değip değmeyeceğini söyler. Çıkış kodu: 0 kapı açık, 1 kapal�
 dizgelerini ve PCI kimliklerini değiştir, `./vfioctl doctor` koş. Zorunlu olan
 iki şey var — kartın IOMMU grubunda kartından başka bir şey olmaması, ve host'un
 ekranını taşıyacak ikinci bir GPU bulunması.
+
+### Host kurulumu
+
+```sh
+./vfioctl install --check   # hiçbir şey yazma: /etc ile aranda ne fark var
+./vfioctl install           # sekiz dosyayı yaz, sonra makineyi okuyup doğrula
+./vfioctl uninstall         # geri al
+```
+
+Kurulan sekiz dosya: iGPU'ya kararlı ad veren udev kuralı, dGPU'yu seat
+envanterinden çıkaran kural, devir hook'u + `vfio.conf`, SDDM greeter'ını
+karttan uzak tutan Xorg anahtarı, ve Looking Glass'ın host yarısı (kvmfr'nin
+`modules-load`/`modprobe`/udev üçlüsü). Dokuzuncu parça `qemu.conf`'un
+`cgroup_device_acl`'i — **üretilen değil düzenlenen** tek yer, ve orada
+yalnızca kendi satırına dokunulur.
+
+Üç şey bilerek yapılmıyor:
+
+- **Paket kurulmaz.** Looking Glass'ın iki yarısı AUR'da; `install` onları
+  ölçer ve yoksa komutu basıp durur. Olmayan bir modül için yapılandırma
+  yazmak, sessiz başarısızlığın ders kitabı hâlidir.
+- **Karta dokunulmaz.** Ne `install` ne `selftest` bir PCI cihazını bağlar,
+  çözer ya da probe eder. Devri libvirt hook'u yapar — tek yazar, bilerek.
+- **`qemu.conf`'un `user`/`group` satırları yazılmaz**, yalnızca raporlanır:
+  onların gerekçesi passthrough değil.
+
+`install --check` kalıcı bir araçtır, tek seferlik bir doğrulama değil: `/etc`
+kayar, paket güncellemesi dosya geri koyar, biri gecenin üçünde VT'den kural
+düzenler. Sorusu şu — *bu makine hâlâ kurduğumuz şey mi?*
+
+### Devri sınamak
+
+```sh
+./vfioctl selftest --preflight   # yalnızca okuma: devir şu an geçer miydi
+./vfioctl selftest               # 5 tur art arda, yargılanmış ve günlüklenmiş
+./vfioctl selftest --rounds 1    # hızlı bakış
+```
+
+**Düz bir VT'den (Ctrl+Alt+F3) ya da başka bir makineden ssh ile koşulur** —
+aradığı arıza grafik oturumunu öldüren arızadır, o oturumun içindeki bir kabuk
+onunla birlikte ölür. Çıktı `/tmp/vfioctl-selftest.log`'a da yazılır, sonuç bu
+yüzden okuyucudan sağ çıkar.
+
+**Yoklayıcı testin parçasıdır.** Kartı saniyede bir açan kısa ömürlü bir süreç
+(bu makinede waybar'ın `gputemp` modülü) devri deterministik olmaktan çıkarıp
+zar atışına çeviriyordu; düzeltmenin işe yarayıp yaramadığı ancak öyle bir
+süreç canlıyken ölçülebilir. Bu yüzden `selftest` yoklayıcı yoksa ya da
+durdurulmuşsa koşmayı reddeder ve her turda onun cpu deltasını basar — sıfır
+delta turu "sonuç geçersiz" yapar. `--no-poller` bilerek sessiz taban çizgisi
+içindir, kabul turu değildir.
 
 ### Misafir inşası
 
@@ -88,15 +140,18 @@ olduğu — koddan değerli; oralar okunmadan değiştirilmemeli.
 | Faz | İçerik |
 |---|---|
 | 0 | taşınma + iskelet ✅ |
-| 1 | kapı: donanım profili biçimi, `doctor` ✅ ← **buradayız** |
-| 2 | host kurulumu: devir hook'u, udev kuralları, Looking Glass host yarısı |
+| 1 | kapı: donanım profili biçimi, `doctor` ✅ |
+| 2 | host kurulumu: devir hook'u, udev kuralları, Looking Glass host yarısı ✅ ← **buradayız** |
 | 3 | misafir inşasının kalan yarısı: üç PS1 betiğini süren kod |
 | 4 | envanter, ek cihaz devri (Bluetooth, ikinci NVMe) |
 
 ## Gereksinimler
 
 `libvirt`, `qemu`, `edk2-ovmf`, `swtpm`, `virtio-win`, `xorriso`, Python 3.11+
-(`tomllib` için). Depo dışı bağımlılık yok.
+(`tomllib` için). Looking Glass için AUR'dan `looking-glass` +
+`looking-glass-module-dkms` (DKMS çekirdek başlıklarını ister). Bu araç paket
+kurmaz — eksik olanı ölçer ve komutu basar. Python tarafında depo dışı
+bağımlılık yok.
 Windows kurulum ISO'su kullanıcının kendisi tarafından sağlanır — bu depo
 misafire ait hiçbir dosyayı indirmez.
 

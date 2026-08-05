@@ -2,18 +2,25 @@
 """vfioctl -- install, check and drive a VFIO GPU passthrough setup.
 
     ./vfioctl doctor              # what is this machine, and may we write here
-    ./vfioctl doctor --profile X  # check against a named profile instead
     ./vfioctl profiles            # which machines this tool claims
+    ./vfioctl install             # write the host-side setup
+    ./vfioctl install --check     # compare /etc with what install would write
+    ./vfioctl uninstall           # take it back out
+    ./vfioctl selftest            # five handover rounds, judged and logged
 
-WHAT IS HERE TODAY. The gate, and only the gate. Everything that writes --
-installing the handover hook and the udev rules, defining a domain, moving the
-card -- lands in later phases and every one of them calls doctor.gate() first.
-The order is on purpose: the gate is written before the things it guards, so
-that no subcommand can ever have existed without one.
+EVERY WRITING SUBCOMMAND GOES THROUGH doctor.gate() AND NONE OF THEM DERIVES
+ITS OWN CHECK. There is one answer to "may we write on this machine" so that
+adding a subcommand cannot accidentally skip it, and there is deliberately no
+flag that turns a closed gate into an open one.
 
-THE GUEST BUILD IS STILL ITS OWN ENTRY POINT (guest/build.py). It predates this
-command and folds in when the guest side is finished; wiring it in now would
-mean designing that subcommand twice.
+NOTHING HERE TOUCHES THE CARD. install writes files; selftest starts a guest
+and reads. The card is moved by the libvirt hook, as root, under libvirtd,
+behind its own lsmod gate -- one writer, on purpose. Writing to unbind or
+drivers_probe from anywhere else is what wedged this machine three times.
+
+THE GUEST BUILD IS STILL ITS OWN ENTRY POINT (guest/build.py). It folds in
+when the guest side is finished; wiring it in now would mean designing that
+subcommand twice.
 """
 
 from __future__ import annotations
@@ -21,7 +28,7 @@ from __future__ import annotations
 import argparse
 import sys
 
-from core import doctor, profile as profile_mod
+from core import doctor, install as install_mod, profile as profile_mod, selftest
 
 
 def cmd_doctor(args) -> int:
@@ -40,6 +47,28 @@ def cmd_profiles(args) -> int:
     return 0
 
 
+def cmd_install(args) -> int:
+    if args.check:
+        return install_mod.check(args.profile, args.kvmfr_mb)
+    return install_mod.install(args.profile, args.kvmfr_mb)
+
+
+def cmd_uninstall(args) -> int:
+    return install_mod.uninstall(args.profile, args.kvmfr_mb)
+
+
+def cmd_selftest(args) -> int:
+    return selftest.run(
+        rounds=args.rounds,
+        domain=args.domain,
+        compositor=args.compositor,
+        poller=None if args.no_poller else args.poller,
+        profile_name=args.profile,
+        assume_yes=args.yes,
+        preflight_only=args.preflight,
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         prog="vfioctl",
@@ -47,15 +76,44 @@ def main() -> int:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
+    parser.add_argument("--profile", default=None,
+                        help="DMI ile seçmek yerine adı verilen profili kullan")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     d = sub.add_parser("doctor", help="makineyi ölç, hiçbir şey yazma")
-    d.add_argument("--profile", default=None,
-                   help="DMI ile seçmek yerine adı verilen profile karşı ölç")
     d.set_defaults(func=cmd_doctor)
 
     pl = sub.add_parser("profiles", help="tanınan makineleri listele")
     pl.set_defaults(func=cmd_profiles)
+
+    ins = sub.add_parser("install", help="host tarafını kur")
+    ins.add_argument("--check", action="store_true",
+                     help="hiçbir şey yazma, kurulu hâlle farkı göster")
+    ins.add_argument("--kvmfr-mb", type=int, default=None,
+                     help="kvmfr paylaşımlı bellek boyutu (varsayılan: en büyük "
+                          "bağlı ekrandan hesaplanır)")
+    ins.set_defaults(func=cmd_install)
+
+    un = sub.add_parser("uninstall", help="kurulanı geri al")
+    un.add_argument("--kvmfr-mb", type=int, default=None,
+                    help=argparse.SUPPRESS)
+    un.set_defaults(func=cmd_uninstall)
+
+    st = sub.add_parser("selftest", help="devri art arda N tur koş ve yargıla")
+    st.add_argument("--rounds", type=int, default=5,
+                    help="tur sayısı (varsayılan 5 — kabul ölçütü)")
+    st.add_argument("--domain", default="win11", help="libvirt domain adı")
+    st.add_argument("--compositor", default="Hyprland",
+                    help="hayatta kaldığı denetlenecek süreç")
+    st.add_argument("--poller", default="waybar",
+                    help="kartı yoklayan süreç — testin parçası")
+    st.add_argument("--no-poller", action="store_true",
+                    help="yoklayıcısız taban çizgisi; kabul turu değildir")
+    st.add_argument("--preflight", action="store_true",
+                    help="yalnızca okuma: devir şu an geçer miydi — VM başlatma")
+    st.add_argument("--yes", action="store_true",
+                    help="VT uyarısını sorma")
+    st.set_defaults(func=cmd_selftest)
 
     args = parser.parse_args()
     return args.func(args)

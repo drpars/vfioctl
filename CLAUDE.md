@@ -41,6 +41,15 @@ bir alt komudun onu kazara atlayamaması.
 - **`win11` domain'i ve `~/.images/win11.qcow2`** — çalışan misafir. Yıkıcı yol
   ona **ad ve disk yoluyla** kapalı (`guest/build.py`), koruma kaldırılmaz.
   Denemeler `win11-test` üzerinde yapılır.
+- **Kartı yalnızca hook taşır.** Hiçbir alt komut bir PCI cihazını bağlamaz,
+  çözmez, probe etmez; `install` dosya yazar, `selftest` misafir başlatıp okur.
+  İkinci bir yazar, bu makineyi üç kez kilitleyen yolun ta kendisi. Bir alt
+  komuda "devir" işi eklenecekse önce bu madde tartışılır.
+- **Paket kurulmaz.** Eksik paket ölçülür ve komutu basılır. Kurmak, bir AUR
+  yardımcısının disiplinini (özellikle: asla `--noconfirm`, PKGBUILD diff'i
+  okunur) burada yeniden üretmek demek olurdu.
+- **`/etc`'e yazan tek yol `core/sysfile.py`.** Araç root olarak koşmaz; yetki
+  yazma anında, tek tek alınır. `doctor` hiçbir zaman yazmaz.
 - **Kartı tutan yollara yazma sırası.** `unbind` / `drivers_probe` yollarına
   `lsmod | grep ^nvidia` **boş olmadıkça** yazılmaz; yazılırsa çekirdek
   `R` durumunda süresiz döner ve tek çıkış reboot. Bu üç kez oldu.

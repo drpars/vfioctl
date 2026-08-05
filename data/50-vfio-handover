@@ -1,0 +1,540 @@
+#!/usr/bin/env bash
+# libvirt qemu hook drop-in. Installed by vfioctl (subcommand: install).
+#
+# Hands the discrete GPU to a guest that asks for it: unload the nvidia stack,
+# bind the card to vfio-pci before the VM starts, give it back when the VM is
+# gone. The machine-specific part -- which PCI addresses -- is not in here; it
+# is read from vfio.conf, which vfioctl generates from the host's own IOMMU
+# group.
+#
+# WHY A DROP-IN, NOT /etc/libvirt/hooks/qemu: since libvirt 6.5.0 every script
+# in <driver>.d/ runs after the main script, in alphabetical order. So this file
+# needs no dispatcher of its own and does not clobber a main hook someone else
+# owns.
+#
+# WHAT LIBVIRT GUARANTEES (from /usr/share/doc/libvirt/html/hooks.html):
+#   qemu <guest> <op> <sub-op> <extra>   -- argv, run as root, domain XML on stdin
+# * prepare/begin: a non-zero exit means the guest is not started. That is
+#   wanted here: better no VM than a guest booting against a card the host
+#   still drives.
+# * Hooks run synchronously -- libvirt waits, so every sleep and timeout below
+#   is added to the guest's start time. Worst case here is ~55 s; the usual
+#   case is ~1 s, because the one wait that could be long (wait_for_release)
+#   returns immediately when nothing holds the card.
+# * On a non-zero exit libvirt logs the return code *and* this script's stderr.
+#   That is why failures go to stderr as well as to the log file: someone whose
+#   VM refused to start reads libvirtd's log, not a file they never heard of.
+# * A hook must never call back into libvirt (virsh included) -- the daemon is
+#   already waiting on this process.
+# * The script must exist when libvirtd starts; added to a running host it is
+#   ignored until the daemon next starts. vfioctl try-restarts libvirtd.
+#
+# THE ONE RULE THIS ENCODES
+# Writing a PCI address to a driver's unbind, or to drivers_probe, while the
+# nvidia modules are loaded and something still holds /dev/nvidia0 sends the
+# nvidia remove() path spinning in the kernel (state R). kill -9 does not clear
+# it; a timeout does not fire on it, because the task cannot take a signal; and
+# whoever issued the write waits with it -- here that is libvirtd, and every
+# virsh after it. Only a reboot clears it. That has happened three times, the
+# last one (2026-08-04) caused by this very script.
+#
+# So those two writes sit behind unload_nvidia(), and bind_vfio() unbinds only
+# from the drivers named in VFIO_SAFE_UNBIND. Finding nvidia on the card after
+# an apparently successful unload is not something to push through: it means
+# udev re-bound it, and the only safe move left is to stop.
+#
+# driver_override is the exception, and it is the exact opposite: a plain
+# attribute write that detaches nothing and probes nothing. It therefore goes
+# FIRST, before the unload. From the moment it is set the PCI core will bind
+# nothing but vfio-pci to these devices, so the window in which udev could
+# re-probe the card as the modules go away is closed structurally instead of by
+# timing. Measured 2026-08-04: written afterwards, that window is real, and
+# udev took it.
+#
+# Every path that gives up after the override is set must clear it again. Left
+# behind, it outlives this script: nvidia can never bind the card again, the
+# machine comes back without its discrete GPU, and nothing on it says why.
+#
+# NOT IN SCOPE
+# The compositor half. Hyprland must already be pinned to the integrated GPU
+# before it starts (AQ_DRM_DEVICES plus the EGL/GLX/Vulkan ICD pins; the stable
+# name comes from the udev symlink vfioctl installs, the variables from
+# dotfiles). A Hyprland that ever opened /dev/nvidia0 makes the unload
+# structurally impossible -- this hook then fails at unload and says so, rather
+# than wedging the machine.
+
+set -uo pipefail
+
+# Overridable so the gate can be checked against a real domain without root and
+# without touching the installed configuration -- see VFIO_HOOK_CHECK below.
+: "${VFIO_CONF:=/etc/libvirt/hooks/vfio.conf}"
+
+[ -r "$VFIO_CONF" ] || exit 0
+# shellcheck source=/dev/null
+. "$VFIO_CONF"
+
+: "${VFIO_DEVICES:=}"
+: "${NVIDIA_MODULES:=nvidia_drm nvidia_modeset nvidia_uvm nvidia}"
+: "${NVIDIA_SERVICES:=nvidia-powerd}"
+: "${VFIO_LOG:=/var/log/vfio-hook.log}"
+
+# Drivers this script is allowed to detach a device from. The list is an
+# allow-list rather than a deny-list on purpose: an unknown driver is a driver
+# whose remove() path nobody has measured, and the failure mode for guessing
+# wrong is a machine that only a power cycle recovers. On this board the only
+# entry that is ever needed is the audio function of the card itself.
+: "${VFIO_SAFE_UNBIND:=snd_hda_intel}"
+
+# Overridable so the bind order can be exercised against a fake tree in the
+# test suite -- the order is the part of this script that cannot be checked by
+# reading it, and the real /sys costs a reboot to get wrong.
+: "${SYSFS_PCI:=/sys/bus/pci}"
+: "${PROC_FS:=/proc}"
+
+# How long prepare/begin may wait, once the card is claimed, for the last
+# process holding an nvidia node to let go -- and how often it looks. Why the
+# wait exists and why it sits exactly where it does: see wait_for_release().
+# With nothing holding the card it costs one scan of PROC_FS and no sleep.
+: "${VFIO_SETTLE_SECS:=15}"
+: "${VFIO_SETTLE_POLL:=0.25}"
+
+# The character devices whose open fds keep the modules above loaded. The DRM
+# node is deliberately not among them: a compositor holding /dev/dri/cardN does
+# not let go by itself, so waiting for it would add VFIO_SETTLE_SECS to a
+# handover that fails either way. Keeping the session away from that node is a
+# udev job (the seat rule vfioctl installs), not this script's.
+: "${VFIO_CARD_NODES:=/dev/nvidia[0-9]* /dev/nvidiactl /dev/nvidia-modeset /dev/nvidia-uvm /dev/nvidia-uvm-tools}"
+
+# Holders owned by this uid are not waited for: nvidia-powerd runs as root and
+# unload_nvidia stops it itself a moment later, so waiting for a process only
+# this script can end would never finish.
+: "${VFIO_HOLDER_IGNORE_UID:=0}"
+
+# Verification mode (see below) has to be runnable by the user who defined the
+# domain, and /var/log is not theirs to write.
+[ -n "${VFIO_HOOK_CHECK:-}" ] && VFIO_LOG=/dev/null
+
+GUEST=${1:-}
+OP=${2:-}
+SUBOP=${3:-}
+
+log() {
+    printf '%s [%s %s/%s] %s\n' \
+        "$(date -Is)" "$GUEST" "$OP" "$SUBOP" "$*" >>"$VFIO_LOG"
+}
+
+die() {
+    log "$*"
+    printf 'vfio-hook: %s\n' "$*" >&2
+    exit 1
+}
+
+[ -n "$VFIO_DEVICES" ] || { log "vfio.conf lists no devices; nothing to do"; exit 0; }
+
+# --- address handling ------------------------------------------------------
+#
+# Everything is compared in one canonical form (0000:01:00.0) so that a
+# hand-edited vfio.conf written as "01:00.0" and libvirt's hex attributes
+# describe the same device.
+
+_hex_ok() { [[ $1 =~ ^(0[xX])?[0-9a-fA-F]{1,4}$ ]]; }
+
+# _attr <name> <tag> -- attribute by name, so tag attribute order never matters.
+_attr() {
+    printf '%s\n' "$2" | sed -n "s/.*[[:space:]]$1=['\"]\([^'\"]*\)['\"].*/\1/p"
+}
+
+# canon <domain> <bus> <slot> <function> -- empty output means "not an address".
+# The values reach $(( )) only after _hex_ok, because arithmetic expansion
+# evaluates its argument as an expression and would run a command substitution
+# hidden inside it.
+canon() {
+    local d=${1:-0} b=${2:-} s=${3:-} f=${4:-}
+    _hex_ok "$d" && _hex_ok "$b" && _hex_ok "$s" && _hex_ok "$f" || return 1
+    printf '%04x:%02x:%02x.%x' "$((d))" "$((b))" "$((s))" "$((f))"
+}
+
+# 0000:01:00.0 / 01:00.0 -> canonical form
+canon_addr() {
+    local rest=$1 dom=0 bus tail
+    case $rest in
+        *:*:*) dom=${rest%%:*}; rest=${rest#*:} ;;
+    esac
+    bus=${rest%%:*}
+    tail=${rest#*:}
+    canon "$dom" "$bus" "${tail%%.*}" "${tail##*.}"
+}
+
+DEVICES=""
+for _dev in $VFIO_DEVICES; do
+    _canon=$(canon_addr "$_dev") || die "vfio.conf: '$_dev' is not a PCI address"
+    DEVICES="${DEVICES:+$DEVICES }$_canon"
+done
+
+# --- the gate --------------------------------------------------------------
+#
+# Gate on the domain XML rather than on a list of guest names. A name list goes
+# stale silently the day a VM is renamed or a second one is defined: the hook
+# would either run for a guest that wants no GPU, or skip the one that does.
+#
+# Two things make a naive grep over the XML wrong, both visible in libvirt's own
+# manual (formatdomain.html):
+#
+#   <hostdev mode='subsystem' type='pci' managed='yes'>
+#     <source>
+#       <address domain='0x0000' bus='0x06' slot='0x12' function='0x1'/>  <-- host
+#     </source>
+#     <address type='pci' domain='0x0000' bus='0x00'
+#              slot='0x02' function='0x0'/>                               <-- guest
+#   </hostdev>
+#
+# 1. The second <address/> is the *guest* slot. Matching it would fire for a
+#    guest that merely happens to put some unrelated device on bus 0x01.
+# 2. libvirt wraps long elements, so attributes of one tag can land on separate
+#    lines -- a line-oriented match misses them.
+#
+# Hence: normalise to one tag per line, track hostdev/source nesting, and read
+# attributes by name rather than by position.
+hostdev_addresses() {
+    local line in_hostdev=0 in_source=0 addr
+    tr '\n' ' ' | sed 's/>/>\n/g' | while IFS= read -r line; do
+        case $line in
+            *"</hostdev"*) in_hostdev=0; in_source=0 ;;
+            *"<hostdev"*)
+                in_hostdev=0
+                case $line in *"type='pci'"* | *'type="pci"'*) in_hostdev=1 ;; esac
+                ;;
+            *"</source"*) in_source=0 ;;
+            *"<source"*) [ "$in_hostdev" = 1 ] && in_source=1 ;;
+            *"<address"*)
+                [ "$in_hostdev" = 1 ] && [ "$in_source" = 1 ] || continue
+                addr=$(canon \
+                    "$(_attr domain "$line")" "$(_attr bus "$line")" \
+                    "$(_attr slot "$line")" "$(_attr function "$line")") || continue
+                printf '%s\n' "$addr"
+                ;;
+        esac
+    done
+}
+
+# Prints the addresses it saw either way: a gate that never fires looks exactly
+# like a hook that was never installed, and the log is the only place that can
+# tell those apart.
+claims_dgpu() {
+    local xml=$1 seen dev
+    seen=$(printf '%s' "$xml" | hostdev_addresses | sort -u | tr '\n' ' ')
+    for dev in $DEVICES; do
+        case " $seen " in
+            *" $dev "*)
+                log "guest claims $dev (hostdev addresses: ${seen:-none})"
+                return 0
+                ;;
+        esac
+    done
+    log "guest claims none of [$DEVICES] (hostdev addresses: ${seen:-none})"
+    return 1
+}
+
+# Verification mode. The gate above is the part that cannot be proven by
+# reading it, so it is runnable on its own against a real domain:
+#
+#   virsh dumpxml <guest> | VFIO_HOOK_CHECK=1 /etc/libvirt/hooks/qemu.d/50-vfio-handover
+#
+# Reads stdin, reports the decision, touches nothing. Exit 0 = would hand the
+# card over, 1 = would leave the driver binding alone.
+if [ -n "${VFIO_HOOK_CHECK:-}" ]; then
+    _xml=$(cat)
+    _seen=$(printf '%s' "$_xml" | hostdev_addresses | sort -u | tr '\n' ' ')
+    printf 'configured: %s\n' "$DEVICES"
+    printf 'hostdev:    %s\n' "${_seen:-(none)}"
+    if claims_dgpu "$_xml"; then
+        printf 'result:     handover\n'
+        exit 0
+    fi
+    printf 'result:     no handover\n'
+    exit 1
+fi
+
+# Only the two edges of the guest's life matter: prepare/begin runs before any
+# resource is claimed, release/end after the domain is gone. Every other call
+# (start, started, stopped, migrate...) leaves the driver binding alone.
+case "$OP/$SUBOP" in
+    prepare/begin | release/end) ;;
+    *) exit 0 ;;
+esac
+
+driver_of() {
+    local link="$SYSFS_PCI/devices/$1/driver"
+    [ -e "$link" ] && basename "$(readlink -f "$link")" || echo "(none)"
+}
+
+nvidia_loaded() { lsmod | grep -q '^nvidia'; }
+
+# Claim the devices for vfio-pci before anything is unloaded. See THE ONE RULE:
+# this is a pure attribute write, and it is what closes the re-probe window.
+set_override() {
+    local dev rc=0
+    for dev in $DEVICES; do
+        echo vfio-pci > "$SYSFS_PCI/devices/$dev/driver_override" 2>/dev/null || {
+            log "FAIL: cannot write driver_override for $dev"
+            rc=1
+        }
+    done
+    return $rc
+}
+
+# Called on every giving-up path once set_override has run, and by release.
+# Best effort by design: this is the undo, so it must not be able to fail in a
+# way that leaves a worse state than it found.
+clear_override() {
+    local dev
+    for dev in $DEVICES; do
+        echo > "$SYSFS_PCI/devices/$dev/driver_override" 2>/dev/null \
+            || log "WARN: could not clear driver_override for $dev"
+    done
+}
+
+# modprobe -r exits non-zero for a module that is not loaded ("FATAL: Module x
+# is not currently loaded"), so handing it the whole list would make its exit
+# code meaningless the day one of them is absent -- and that exit code is the
+# only honest signal this function has. Give it exactly what is loaded.
+loaded_nvidia_modules() {
+    local mod loaded out=""
+    loaded=" $(lsmod | awk 'NR > 1 { print $1 }' | tr '\n' ' ')"
+    for mod in $NVIDIA_MODULES; do
+        case $loaded in *" $mod "*) out="${out:+$out }$mod" ;; esac
+    done
+    printf '%s' "$out"
+}
+
+unload_blame() {
+    local mod
+    for mod in $NVIDIA_MODULES; do
+        [ -d "/sys/module/$mod" ] && log "  $mod refcnt=$(cat "/sys/module/$mod/refcnt" 2>/dev/null)"
+    done
+    # The usual culprit is a PRIME-offloaded process (a game, or a browser
+    # started with __NV_PRIME_RENDER_OFFLOAD) that has to be closed first. On
+    # this machine it has also been SDDM's X greeter, which never let the card
+    # go from boot.
+    log "  holders: $(fuser -v /dev/nvidia* 2>&1 | tr '\n' ' ')"
+}
+
+# "comm(pid)" for every process holding one of VFIO_CARD_NODES, minus root's
+# and this script's own. Written without a fork per process on purpose: it runs
+# every VFIO_SETTLE_POLL over the whole of PROC_FS. `-ef` compares device and
+# inode through the /proc/<pid>/fd symlink, so no readlink is needed, and the
+# comm is read with the shell's own redirection. Only a process that turns out
+# to hold a node costs a stat, and there is normally none.
+card_holders() {
+    local fd node pid comm uid seen=" " out=""
+    for fd in "$PROC_FS"/[0-9]*/fd/*; do
+        pid=${fd#"$PROC_FS"/}
+        pid=${pid%%/*}
+        [ "$pid" = "$$" ] && continue
+        case $seen in *" $pid "*) continue ;; esac
+        for node in $VFIO_CARD_NODES; do
+            [ "$fd" -ef "$node" ] || continue
+            seen="$seen$pid "
+            # A process that exited mid-scan is not a holder any more; treat an
+            # unreadable owner as "nothing to wait for" rather than waiting the
+            # full VFIO_SETTLE_SECS for a pid that is already gone.
+            uid=$(stat -c %u "$PROC_FS/$pid" 2>/dev/null) \
+                || uid=$VFIO_HOLDER_IGNORE_UID
+            if [ "$uid" != "$VFIO_HOLDER_IGNORE_UID" ]; then
+                comm=""
+                [ -r "$PROC_FS/$pid/comm" ] && read -r comm < "$PROC_FS/$pid/comm"
+                out="${out:+$out }${comm:-?}($pid)"
+            fi
+            break
+        done
+    done
+    printf '%s' "$out"
+}
+
+# Between claiming the card and unloading the driver: give whatever still has
+# an nvidia node open a bounded chance to close it.
+#
+# WHY IT EXISTS. A short-lived process that opens /dev/nvidia0 makes the unload
+# below fail with "FATAL: Module nvidia is in use". On this machine it was
+# waybar's gputemp module calling nvidia-smi once a second, and the handover
+# was a dice roll: on 2026-08-04 two starts in a row were refused, both blaming
+# nvidia-smi, and freezing waybar with kill -STOP made the next one succeed
+# first try. The fragile window is not an instant but the whole of modprobe -r:
+# any call *born* while it runs grabs the card. Which program it is, is beside
+# the point -- anything on the host that opens the node does the same, and a
+# hook that only looks at the refcount it happens to see stays probabilistic.
+#
+# WHY HERE AND NOWHERE ELSE. Waiting before driver_override is written proves
+# nothing: a poller is free to come back a moment later, and one did -- a caller
+# that settled first saw a clean card and the hook found nvidia-smi on it two
+# seconds after. Once the override is set, the PCI core will bind nothing but
+# vfio-pci, and a poller that reads the override before it spawns (dotfiles'
+# gputemp does since 2026-08-04) stops spawning at all. That makes this the one
+# point where "nobody holds the card" stays true long enough to act on.
+wait_for_release() {
+    local held
+    held=$(card_holders)
+    [ -n "$held" ] || return 0
+    log "waiting up to ${VFIO_SETTLE_SECS}s for the card: $held"
+    SECONDS=0
+    while [ "$SECONDS" -lt "$VFIO_SETTLE_SECS" ]; do
+        sleep "$VFIO_SETTLE_POLL"
+        held=$(card_holders)
+        [ -n "$held" ] || { log "card released after ${SECONDS}s"; return 0; }
+    done
+    log "FAIL: still held after ${VFIO_SETTLE_SECS}s: $held"
+    return 1
+}
+
+# The gate the whole script rests on. Returns non-zero -- and logs who is to
+# blame -- rather than letting the caller near the PCI driver core.
+unload_nvidia() {
+    local svc mods out rc
+    for svc in $NVIDIA_SERVICES; do
+        systemctl stop "$svc" 2>/dev/null
+    done
+
+    mods=$(loaded_nvidia_modules)
+    if [ -n "$mods" ]; then
+        # shellcheck disable=SC2086  # deliberately split: it is a list of modules
+        out=$(modprobe -r $mods 2>&1)
+        rc=$?
+        printf '%s\n' "$out" | while IFS= read -r line; do
+            [ -n "$line" ] && log "modprobe: $line"
+        done
+        if [ "$rc" -ne 0 ]; then
+            # "FATAL: Module nvidia_drm is in use." was a real answer and used
+            # to be thrown away: the decision was left to an lsmod a second
+            # later, which came back clean -- because the kernel had killed the
+            # process holding the card, taking the user's whole graphical
+            # session with it. A non-zero exit is a failure even when the later
+            # lsmod looks fine.
+            log "FAIL: modprobe -r exited $rc"
+            unload_blame
+            return 1
+        fi
+    fi
+
+    sleep 1
+    nvidia_loaded || { log "all nvidia modules unloaded"; return 0; }
+
+    log "FAIL: nvidia modules still loaded"
+    unload_blame
+    return 1
+}
+
+reload_nvidia() {
+    local svc
+    modprobe nvidia_drm 2>&1 | while IFS= read -r line; do log "modprobe: $line"; done
+    for svc in $NVIDIA_SERVICES; do
+        systemctl start "$svc" 2>/dev/null
+    done
+}
+
+safe_to_unbind() {
+    local ok
+    for ok in $VFIO_SAFE_UNBIND; do
+        [ "$1" = "$ok" ] && return 0
+    done
+    return 1
+}
+
+# Runs only after set_override and a successful unload_nvidia, so the override
+# is already in place and every device here can bind to nothing but vfio-pci.
+bind_vfio() {
+    local dev cur rc=0
+    modprobe vfio-pci || { log "FAIL: vfio-pci will not load"; return 1; }
+    for dev in $DEVICES; do
+        cur=$(driver_of "$dev")
+        case $cur in
+            "(none)" | vfio-pci) ;;
+            *)
+                if ! safe_to_unbind "$cur"; then
+                    # 'nvidia' here means the unload reported success and udev
+                    # re-bound the card behind it. Writing unbind now is exactly
+                    # the wedge this script exists to avoid, so stop instead.
+                    log "FAIL: $dev is on '$cur', which is not in VFIO_SAFE_UNBIND ($VFIO_SAFE_UNBIND) -- refusing to unbind it"
+                    return 1
+                fi
+                # This timeout catches a driver that hangs *and* can still take
+                # a signal. It is not what keeps us out of the unkillable case;
+                # refusing the write above is. And it is fatal rather than
+                # logged: going on to drivers_probe with an unbind in an unknown
+                # state is how a card ends up half-detached.
+                timeout 20 tee "$SYSFS_PCI/drivers/$cur/unbind" <<<"$dev" >/dev/null 2>&1 || {
+                    log "FAIL: unbind of $dev from $cur did not finish"
+                    return 1
+                }
+                ;;
+        esac
+        timeout 20 tee "$SYSFS_PCI/drivers_probe" <<<"$dev" >/dev/null 2>&1
+    done
+    for dev in $DEVICES; do
+        cur=$(driver_of "$dev")
+        log "$dev -> $cur"
+        [ "$cur" = "vfio-pci" ] || rc=1
+    done
+    return $rc
+}
+
+release_vfio() {
+    local dev
+    # Order matters and is the reverse of bind: clear the override and unbind
+    # from vfio-pci *before* the nvidia modules come back, so nothing is ever
+    # asked to detach a card nvidia has re-attached to.
+    clear_override
+    # libvirt also calls release/end after a prepare/begin that refused, so a
+    # device here may never have left nvidia. Both writes below are therefore
+    # asked "is there anything to do" first: probing a device that already has
+    # a driver is a no-op the kernel answers with -EBUSY, but this is the one
+    # file where "harmless in theory" has cost three reboots.
+    for dev in $DEVICES; do
+        [ "$(driver_of "$dev")" = "vfio-pci" ] \
+            && timeout 20 tee "$SYSFS_PCI/drivers/vfio-pci/unbind" <<<"$dev" >/dev/null 2>&1
+    done
+    reload_nvidia
+    for dev in $DEVICES; do
+        [ "$(driver_of "$dev")" = "(none)" ] \
+            && timeout 20 tee "$SYSFS_PCI/drivers_probe" <<<"$dev" >/dev/null 2>&1
+        log "$dev -> $(driver_of "$dev")"
+    done
+}
+
+xml=$(cat)
+claims_dgpu "$xml" || exit 0
+
+case "$OP/$SUBOP" in
+prepare/begin)
+    log "handover requested; dGPU currently on $(driver_of "${DEVICES%% *}")"
+    # Order is the whole point here; see THE ONE RULE at the top.
+    if ! set_override; then
+        clear_override
+        die "cannot claim the devices for vfio-pci"
+    fi
+    # Every failure below puts the host back the way we found it before
+    # refusing: the desktop should not lose PRIME offload -- or the card
+    # altogether, via a leftover override -- because a VM failed to start.
+    if ! wait_for_release; then
+        clear_override
+        reload_nvidia
+        die "the dGPU is still open -- close whatever holds /dev/nvidia0 and retry"
+    fi
+    if ! unload_nvidia; then
+        clear_override
+        reload_nvidia
+        die "cannot free the dGPU -- close whatever holds /dev/nvidia0 and retry"
+    fi
+    if ! bind_vfio; then
+        clear_override
+        reload_nvidia
+        die "devices did not bind to vfio-pci"
+    fi
+    log "handover complete"
+    ;;
+release/end)
+    release_vfio
+    log "card returned to the host"
+    ;;
+esac
+
+exit 0
