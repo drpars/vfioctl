@@ -66,6 +66,8 @@ def cmd_selftest(args) -> int:
         profile_name=args.profile,
         assume_yes=args.yes,
         preflight_only=args.preflight,
+        boot_timeout=args.boot_timeout,
+        shutdown_timeout=args.shutdown_timeout,
     )
 
 
@@ -109,6 +111,10 @@ def main() -> int:
                     help="kartı yoklayan süreç — testin parçası")
     st.add_argument("--no-poller", action="store_true",
                     help="yoklayıcısız taban çizgisi; kabul turu değildir")
+    st.add_argument("--boot-timeout", type=int, default=300,
+                    help="misafirin ajanı cevaplaması için saniye (varsayılan 300)")
+    st.add_argument("--shutdown-timeout", type=int, default=300,
+                    help="misafirin kapanması için saniye (varsayılan 300)")
     st.add_argument("--preflight", action="store_true",
                     help="yalnızca okuma: devir şu an geçer miydi — VM başlatma")
     st.add_argument("--yes", action="store_true",

@@ -270,6 +270,12 @@ class Target:
     dgpu_audio: str | None
     compositor: str
     poller: str | None
+    # How long a round gives the guest to become usable, and then to go away.
+    # Both are generous on purpose: too short turns a working setup into a
+    # failed round, which is the more expensive mistake -- it sends the reader
+    # hunting a handover bug that is not there.
+    boot_timeout: int = 300
+    shutdown_timeout: int = 300
 
 
 def preflight(target: Target) -> bool:
@@ -376,6 +382,31 @@ def _wait_state(domain: str, wanted: str, seconds: int) -> str:
     return state
 
 
+def wait_for_agent(domain: str, seconds: int) -> int | None:
+    """Seconds until the guest's agent answers, or None if it never did.
+
+    WHY A ROUND CANNOT SKIP THIS. "running" means qemu is executing, not that
+    the guest can do anything -- and an ACPI shutdown request sent to Windows
+    while it is still booting is simply ignored. The first real run of this
+    command failed exactly there: the handover was clean, the guest was fine,
+    and the round was scored a failure because shutdown had been asked for
+    seventeen seconds after power-on and nothing answered it (2026-08-05).
+
+    A fixed sleep is the wrong fix and this project has the rule written down:
+    waiting a set number of seconds and then polling is not a test. The guest
+    answering is the event; how long it takes is the measurement.
+    """
+    started = time.monotonic()
+    deadline = started + seconds
+    while time.monotonic() < deadline:
+        rc, _ = _virsh(
+            ["qemu-agent-command", domain, '{"execute":"guest-ping"}'], timeout=30)
+        if rc == 0:
+            return int(time.monotonic() - started)
+        time.sleep(5)
+    return None
+
+
 def one_round(target: Target, number: int, comp_before: str | None) -> str:
     """Empty string when the round was clean, otherwise why it was not."""
     print(f"\n\n=== TUR {number}  {_now()}")
@@ -399,7 +430,6 @@ def one_round(target: Target, number: int, comp_before: str | None) -> str:
         verdict = f"start reddedildi: {out}"
     else:
         state = _wait_state(target.domain, "running", 60)
-        time.sleep(10)
         driver = install_mod.driver_of(target.dgpu)
         comp_now = pid_of(target.compositor)
         print(f"   kart={driver} domain={state} {target.compositor}={comp_now}")
@@ -411,22 +441,43 @@ def one_round(target: Target, number: int, comp_before: str | None) -> str:
             verdict = (f"start: compositor öldü ya da yeniden başladı "
                        f"({comp_before} → {comp_now})")
 
+        # The card has moved and the desktop survived, which is what the
+        # handover half of the round was asking. The guest becoming usable is
+        # the next question, and shutdown may not be requested before it.
+        booted = wait_for_agent(target.domain, target.boot_timeout)
+        if booted is None:
+            print(f"   ajan {target.boot_timeout}s içinde cevap vermedi")
+            if not verdict:
+                verdict = (f"misafir {target.boot_timeout}s'de kullanılabilir "
+                           "hâle gelmedi (devir değil, misafir sorunu)")
+        else:
+            print(f"   ajan {booted}s sonra cevap verdi — misafir ayakta")
+
     # Give the card back even if start failed -- leaving it on vfio-pci would
     # make every later round meaningless, and shutdown is harmless on a domain
     # that is already off.
     print(f"\n== {target.domain} kapatılıyor")
     _virsh(["shutdown", target.domain], timeout=60)
-    state = _wait_state(target.domain, "shut off", 180)
+    state = _wait_state(target.domain, "shut off", target.shutdown_timeout)
     time.sleep(5)
     driver = install_mod.driver_of(target.dgpu)
     comp_now = pid_of(target.compositor)
     print(f"   kart={driver} domain={state} {target.compositor}={comp_now}")
-    if not verdict:
+    if state != "shut off":
+        # Order matters in the verdict as much as in the code: the card being
+        # on vfio-pci here is a consequence, not the fault. release/end never
+        # ran because the domain never ended, and saying "release/end did not
+        # run" would send the next reader to the hook, which is innocent.
+        if not verdict:
+            verdict = (f"geri: misafir {target.shutdown_timeout}s'de kapanmadı "
+                       f"(domain '{state}') — kart hâlâ misafirde")
+        print(f"   !! misafir hâlâ çalışıyor ve kart onda. Zorla kapatma "
+              f"yapılmadı (bilerek: '{target.domain}' korunuyor).")
+        print(f"   !! elle: virsh -c qemu:///system shutdown {target.domain}")
+    elif not verdict:
         if driver != "nvidia":
             verdict = (f"geri: kart '{driver}', beklenen nvidia — release/end "
                        "koşmadı")
-        elif state != "shut off":
-            verdict = f"geri: domain '{state}', beklenen shut off"
         elif comp_now != comp_before:
             verdict = (f"geri: compositor öldü ya da yeniden başladı "
                        f"({comp_before} → {comp_now})")
@@ -450,7 +501,8 @@ def one_round(target: Target, number: int, comp_before: str | None) -> str:
 
 def run(rounds: int = 5, domain: str = "win11", compositor: str = "Hyprland",
         poller: str | None = "waybar", profile_name: str | None = None,
-        assume_yes: bool = False, preflight_only: bool = False) -> int:
+        assume_yes: bool = False, preflight_only: bool = False,
+        boot_timeout: int = 300, shutdown_timeout: int = 300) -> int:
     """Run the rounds, or -- with preflight_only -- just the reading half.
 
     The read-only mode is not a convenience. It answers "would a handover work
@@ -475,7 +527,8 @@ def run(rounds: int = 5, domain: str = "win11", compositor: str = "Hyprland",
         return 1
 
     if preflight_only:
-        target = Target(domain, layout.dgpu, layout.dgpu_audio, compositor, poller)
+        target = Target(domain, layout.dgpu, layout.dgpu_audio, compositor, poller,
+                        boot_timeout, shutdown_timeout)
         ok = preflight(target)
         print(f"\n   günlük: {LOG}")
         return 0 if ok else 1
@@ -504,7 +557,8 @@ def run(rounds: int = 5, domain: str = "win11", compositor: str = "Hyprland",
                   "kill -CONT edin ya da --no-poller verin.")
             return 2
 
-    target = Target(domain, layout.dgpu, layout.dgpu_audio, compositor, poller)
+    target = Target(domain, layout.dgpu, layout.dgpu_audio, compositor, poller,
+                        boot_timeout, shutdown_timeout)
     comp_before = pid_of(compositor)
     poller_j0 = cpu_jiffies(poller_pid)
 
