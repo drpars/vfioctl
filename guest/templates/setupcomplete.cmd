@@ -1,6 +1,6 @@
 @echo off
 rem ---------------------------------------------------------------------------
-rem  Staged onto the helper ISO as \qemu-vfio\setupcomplete.cmd, copied by the
+rem  Staged onto the helper ISO as \vfioctl\setupcomplete.cmd, copied by the
 rem  specialize pass to C:\Windows\Setup\Scripts\SetupComplete.cmd, and run by
 rem  Setup as SYSTEM right before the first logon.
 rem
@@ -23,9 +23,9 @@ rem  habit, and C:\Users\Public because that is where the console user can read
 rem  it without elevation (same reasoning as guest/windows/display-layout.ps1).
 rem ---------------------------------------------------------------------------
 
-set LOG=C:\Windows\Temp\qemu-vfio-setupcomplete.log
+set LOG=C:\Windows\Temp\vfioctl-setupcomplete.log
 
-echo ==== qemu-vfio setupcomplete %DATE% %TIME% ==== >> "%LOG%" 2>&1
+echo ==== vfioctl setupcomplete %DATE% %TIME% ==== >> "%LOG%" 2>&1
 
 rem --- qemu-ga: the keystone -------------------------------------------------
 rem Drive letters are unstable, so probe instead of assuming.
@@ -36,7 +36,7 @@ if not defined GA (
 	echo FAIL: qemu-ga-x86_64.msi not found on any of D: E: F: G: H: I: >> "%LOG%" 2>&1
 ) else (
 	echo installing %GA% >> "%LOG%" 2>&1
-	msiexec /i "%GA%" /qn /norestart /L*v C:\Windows\Temp\qemu-vfio-qemuga.log
+	msiexec /i "%GA%" /qn /norestart /L*v C:\Windows\Temp\vfioctl-qemuga.log
 	echo msiexec exit=%ERRORLEVEL% >> "%LOG%" 2>&1
 	sc query QEMU-GA >> "%LOG%" 2>&1
 )
@@ -55,8 +55,8 @@ powercfg /change monitor-timeout-ac 0 >> "%LOG%" 2>&1
 powercfg /change standby-timeout-ac 0 >> "%LOG%" 2>&1
 
 rem --- leave the evidence where it can be read --------------------------------
-copy /y "%LOG%" C:\Users\Public\qemu-vfio-setupcomplete.log >nul 2>&1
+copy /y "%LOG%" C:\Users\Public\vfioctl-setupcomplete.log >nul 2>&1
 echo ==== done %DATE% %TIME% ==== >> "%LOG%" 2>&1
-copy /y "%LOG%" C:\Users\Public\qemu-vfio-setupcomplete.log >nul 2>&1
+copy /y "%LOG%" C:\Users\Public\vfioctl-setupcomplete.log >nul 2>&1
 
 exit /b 0

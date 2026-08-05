@@ -14,8 +14,7 @@
 
     Run it the same way as guest/windows/vdd.ps1, through the agent as SYSTEM:
 
-        push.sh guest/windows/looking-glass.ps1 C:\Windows\Temp\vfioctl-lg.ps1
-        powershell -ExecutionPolicy Bypass -File C:\Windows\Temp\vfioctl-lg.ps1
+        ./guest/build.py --name <domain> setup
 
     PRECONDITION: the ivshmem device must already be in the domain, otherwise
     the installer stages a driver with nothing to bind to and the host service
@@ -82,10 +81,15 @@ try {
     Say 'done'
 }
 catch {
+    # See vdd.ps1: a zero exit from a script that printed FAILED lets the driver
+    # move on to the next step on top of a broken one. Stop-Transcript runs
+    # first, so the exit belongs in `finally`.
     Write-Host "FAILED: $_"
     Write-Host $_.ScriptStackTrace
+    $script:Failed = $true
 }
 finally {
     if ($tmp -and (Test-Path $tmp)) { Remove-Item -Path $tmp -Recurse -Force -ErrorAction SilentlyContinue }
     Stop-Transcript | Out-Null
+    if ($script:Failed) { exit 1 }
 }

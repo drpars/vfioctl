@@ -10,8 +10,10 @@
     as NT AUTHORITY\SYSTEM -- no SSH, no network share, no interactive session.
     The channel is the guest agent; commands land as SYSTEM in session 0.
 
-        push.sh guest/windows/vdd.ps1 C:\Windows\Temp\vfioctl-vdd.ps1
-        powershell -ExecutionPolicy Bypass -File C:\Windows\Temp\vfioctl-vdd.ps1
+        ./guest/build.py --name <domain> setup
+
+    which pushes it to C:\Users\Public\vfioctl\ and runs it there, then reads
+    the guest's monitor inventory back rather than trusting this script's word.
 
     NOTHING MACHINE-SPECIFIC IS BAKED IN (K9): every URL, hash and the GPU name
     are parameters. The defaults are what was measured to work on this host.
@@ -210,10 +212,16 @@ try {
     Say 'done'
 }
 catch {
+    # THE EXIT CODE HAS TO MOVE TOO. build.py drives this through guest-exec,
+    # and a zero from a script that just printed FAILED is a round that carries
+    # on to the next step standing on a broken one. Stop-Transcript has to run
+    # first, so the exit lives in `finally` and this only records the verdict.
     Write-Host "FAILED: $_"
     Write-Host $_.ScriptStackTrace
+    $script:Failed = $true
 }
 finally {
     if ($tmp -and (Test-Path $tmp)) { Remove-Item -Path $tmp -Recurse -Force -ErrorAction SilentlyContinue }
     Stop-Transcript | Out-Null
+    if ($script:Failed) { exit 1 }
 }

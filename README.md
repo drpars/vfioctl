@@ -166,6 +166,7 @@ arda beş kez.
 
 ```sh
 ./guest/build.py build --user <ad> --password-file <yol>
+./guest/build.py setup          # VDD → Looking Glass host → tek ekran
 ./guest/build.py status
 ./guest/build.py clean
 ```
@@ -173,9 +174,18 @@ arda beş kez.
 Bu makinede ölçüldü: boş diskten ajanı ulaşılabilir, konsol oturumu açık bir
 Windows 11 Pro 25H2'ye **7 dk 33 sn**, elle adım yok.
 
-`guest/windows/` altındaki üç betik (sanal ekran sürücüsü, Looking Glass host,
-ekran topolojisi) idempotent ve çalışıyor, ama henüz elle sürülüyor — onları
-sırayla koşan sürücü kod sıradaki iş.
+`setup`, `guest/windows/` altındaki üç betiği misafire iter ve sırayla koşar.
+Sıra bir bağımlılık: ekran topolojisinin yalıtacak bir şeyi olması için önce
+VDD'nin ekranı doğmalı. Bu yüzden her adım **kurucunun çıkış kodunu değil
+misafirin envanterini** okur — VDD'nin oluşturduğu monitör, LG servisinin
+durumu, topolojinin kendi hükmü. VDD'nin render edeceği bağdaştırıcı da
+misafirde keşfedilir (`--gpu-name` ile geçilebilir): adı yalnızca Windows
+bilir, ve yanlış ad "LG bağlanıyor ama hiç kare gelmiyor" olarak görünür.
+
+**Yıkıcı yol yalnızca bu betiğin ürettiği misafirlere uygulanır.** `build`
+tanımladığı her domain'i kendi ad alanında işaretler; `clean` işaretsiz bir
+domain'e ve başka bir domain'in diskine dokunmaz. Ad listesi tutulmuyor — o,
+yalnızca yazıldığı makineyi korur.
 
 **Her dosyanın başlığında gerekçeli bir açıklama var.** Neyin neden öyle
 yazıldığı — hangi API'nin sessizce başarısız olduğu, hangi sıranın zorunlu
@@ -187,8 +197,8 @@ olduğu — koddan değerli; oralar okunmadan değiştirilmemeli.
 |---|---|
 | 0 | taşınma + iskelet ✅ |
 | 1 | kapı: donanım profili biçimi, `doctor`, seans yarısının ölçümü ✅ |
-| 2 | host kurulumu: devir hook'u, udev kuralları, Looking Glass host yarısı ✅ ← **buradayız** |
-| 3 | misafir inşasının kalan yarısı: üç PS1 betiğini süren kod |
+| 2 | host kurulumu: devir hook'u, udev kuralları, Looking Glass host yarısı ✅ |
+| 3 | misafir inşasının kalan yarısı: üç PS1 betiğini süren kod ← **buradayız** |
 | 4 | envanter, ek cihaz devri (Bluetooth, ikinci NVMe) |
 
 ## Gereksinimler

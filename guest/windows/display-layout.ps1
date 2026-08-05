@@ -32,12 +32,14 @@
     target path: it must be somewhere the console user can READ, and
     C:\Windows\Temp is not (the task silently produced nothing until this moved).
 
-        push.sh guest/windows/display-layout.ps1 C:\Users\Public\6-misafir-ekran.ps1
-        powershell -ExecutionPolicy Bypass -File C:\Users\Public\6-misafir-ekran.ps1
+    build.py's `setup` pushes it to C:\Users\Public\vfioctl\ and runs it there:
 
-    The way back, if VDD ever fails to come up and the guest is left blind:
+        powershell -ExecutionPolicy Bypass -File C:\Users\Public\vfioctl\display-layout.ps1
 
-        powershell -File C:\Users\Public\6-misafir-ekran.ps1 -Reattach
+    The way back, if VDD ever fails to come up and the guest is left blind --
+    and the reason the script stays on disk in the guest at all:
+
+        powershell -File C:\Users\Public\vfioctl\display-layout.ps1 -Reattach
 
     It is idempotent: if the target is already the only attached display it says
     so and changes nothing.
@@ -49,19 +51,22 @@ param(
     [string]$AdapterMatch = 'Virtual Display Driver',
     # Restore the multi-display desktop instead (DisplaySwitch /extend).
     [switch]$Reattach,
-    [string]$TaskName = 'qemu-vfio-display-topology',
+    [string]$TaskName = 'vfioctl-display-topology',
     # C:\Users\Public, not C:\Windows\Temp: the task runs as the console user,
     # who can neither read scripts from nor write logs under C:\Windows.
-    [string]$LogPath = 'C:\Users\Public\qemu-vfio-display.log',
+    [string]$LogPath = 'C:\Users\Public\vfioctl\display-layout.log',
     # Set when the script is re-entered inside the console session.
     [switch]$Apply
 )
 
 $ErrorActionPreference = 'Stop'
-$argFile = 'C:\Users\Public\qemu-vfio-display.json'
+$argFile = 'C:\Users\Public\vfioctl\display-layout.json'
 
 # ---------------------------------------------------------------- bootstrap half
 if (-not $Apply) {
+    # Both halves write here, and the console-session half has no way to report
+    # a missing directory: its only channel is the log file it cannot create.
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $LogPath) | Out-Null
     if (Test-Path $LogPath) { Remove-Item $LogPath -Force }
 
     # `query session` is the only thing that knows who is at the console, and a
@@ -92,8 +97,20 @@ if (-not $Apply) {
     }
     finally { & schtasks.exe /delete /tn $TaskName /f 2>&1 | Out-Null }
 
-    if (Test-Path $LogPath) { Get-Content $LogPath } else { Write-Host 'no log -- the task produced nothing' }
-    return
+    # THE EXIT CODE HAS TO COME FROM THE LOG. schtasks /run returns 0 whatever
+    # the task then does, and the working half runs in another session where
+    # nothing it says can reach this process. So the verdict is read back out of
+    # the file, and a missing verdict counts as failure -- a task that produced
+    # no log is precisely the silent breakage this bridge is prone to.
+    if (-not (Test-Path $LogPath)) {
+        Write-Host 'no log -- the task produced nothing'
+        exit 1
+    }
+    $verdict = Get-Content $LogPath -Raw
+    Write-Host $verdict
+    if ($verdict -match 'FAILED') { exit 1 }
+    if ($verdict -notmatch 'DONE') { Write-Host 'no verdict in the log'; exit 1 }
+    exit 0
 }
 
 # -------------------------------------------------------------- the working half

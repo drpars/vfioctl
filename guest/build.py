@@ -1,18 +1,24 @@
 #!/usr/bin/env python3
 """Build a Windows guest unattended, from a blank disk to a reachable qemu-ga.
 
-    ./guest/build.py build           # the whole round, ~25-35 min, unattended
+    ./guest/build.py build           # the whole round, ~7-10 min, unattended
+    ./guest/build.py setup           # push and drive the three guest scripts
     ./guest/build.py status          # where is it now
     ./guest/build.py screenshot      # what is on its screen
     ./guest/build.py autologon       # re-run just the console-session step
     ./guest/build.py clean           # undefine + delete disk, nvram, helper ISO
 
-WHAT THIS REPLACES. Four stages used to be done by hand: defining the domain,
-answering Setup, waiting for the agent, and running the post-install scripts.
-This drives the first three and the one post-install step the rest depend on.
-The three PS1 scripts under guest/windows/ are still driven by hand; they are
-already idempotent, and what they lack is a driver, which only makes sense
-once there is reliably a guest for it to talk to.
+WHAT THIS REPLACES. Five stages used to be done by hand: defining the domain,
+answering Setup, waiting for the agent, opening a console session, and running
+the three post-install scripts. All five are here now. `build` stops at a guest
+that can be driven; `setup` is the half that drives it, separate because a
+guest is worth building for reasons that have nothing to do with the display.
+
+WHAT `setup` MEASURES RATHER THAN CLAIMS. Each of the three scripts installs
+something the next one needs, so between them the guest's own inventory is read
+back: the monitor VDD created, the Looking Glass service's state, the display
+topology's verdict. An installer's exit code says the installer finished, which
+is a different sentence.
 
 THE FINISH LINE IS A GUEST THAT CAN BE DRIVEN, AND THAT TAKES TWO THINGS.
 An agent, because everything the host does afterwards goes over guest-exec --
@@ -289,7 +295,7 @@ def build_unattend_iso(workdir: Path, unattend_xml: str, out_iso: Path):
     staging = workdir / "iso"
     if staging.exists():
         shutil.rmtree(staging)
-    (staging / "qemu-vfio").mkdir(parents=True)
+    (staging / "vfioctl").mkdir(parents=True)
 
     (staging / "autounattend.xml").write_text(unattend_xml, encoding="utf-8")
 
@@ -297,7 +303,7 @@ def build_unattend_iso(workdir: Path, unattend_xml: str, out_iso: Path):
     # mis-parses LF-only batch files in ways that look like the script simply
     # did nothing -- the one failure mode this whole file is built to avoid.
     src = (TEMPLATES / "setupcomplete.cmd").read_text(encoding="utf-8")
-    (staging / "qemu-vfio" / "setupcomplete.cmd").write_bytes(
+    (staging / "vfioctl" / "setupcomplete.cmd").write_bytes(
         src.replace("\r\n", "\n").replace("\n", "\r\n").encode("utf-8")
     )
 
@@ -538,6 +544,250 @@ def wait_for_agent(name: str, workdir: Path, timeout_min: int) -> bool:
 
 
 # --------------------------------------------------------------------------- #
+# the guest-side setup: three scripts, pushed and driven
+# --------------------------------------------------------------------------- #
+
+WINDOWS = HERE / "windows"
+
+# WHY THE SCRIPTS LIVE ON DISK IN THE GUEST rather than being folded into the
+# command. display-layout.ps1 re-launches itself into the console session
+# through a scheduled task -- it needs a path to point that task at -- and its
+# -Reattach escape hatch is only reachable by somebody sitting at the guest
+# with no working display. -EncodedCommand breaks both.
+#
+# C:\Users\Public, because the console user has to be able to read it.
+# C:\Windows\Temp swallowed this once: the task ran, read nothing, and reported
+# success, which looks exactly like a task that did its job.
+GUEST_DIR = r"C:\Users\Public\vfioctl"
+
+# qemu-ga takes base64 in a JSON command line; 48 KB of payload is about 64 KB
+# of argument, which keeps every write comfortably inside the agent's limits.
+PUSH_CHUNK = 48 * 1024
+
+# Red Hat QXL, the emulated adapter every one of these guests has. Anything the
+# indirect display should render on is by definition NOT this.
+QXL_HWID = "PCI\\VEN_1B36"
+
+
+def guest_push(name: str, local: Path, remote: str) -> bool:
+    """Copy a file into the guest over the agent, in chunks."""
+    data = local.read_bytes()
+    handle = agent_cmd(name, {"execute": "guest-file-open",
+                              "arguments": {"path": remote, "mode": "wb"}})
+    if not isinstance(handle, int):
+        say(f"  {local.name}: guest-file-open reddedildi")
+        return False
+    ok = True
+    try:
+        for start in range(0, len(data), PUSH_CHUNK):
+            buf = base64.b64encode(data[start:start + PUSH_CHUNK]).decode()
+            if agent_cmd(name, {"execute": "guest-file-write", "arguments": {
+                    "handle": handle, "buf-b64": buf}}) is None:
+                say(f"  {local.name}: guest-file-write düştü ({start} baytta)")
+                ok = False
+                break
+    finally:
+        agent_cmd(name, {"execute": "guest-file-close",
+                         "arguments": {"handle": handle}})
+    return ok
+
+
+def powershell(name: str, args: list[str], timeout: int = 120):
+    return guest_exec(name, "powershell.exe", [
+        "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", *args,
+    ], timeout=timeout)
+
+
+def ps_json(name: str, expression: str, timeout: int = 120):
+    """Evaluate a PowerShell expression in the guest and parse its JSON.
+
+    ConvertTo-Json hands back a bare object for a single result and an array for
+    several, so the shape is normalised here -- code that has to remember which
+    it is gets that wrong on the day a machine has one display adapter.
+    """
+    code, out, _ = powershell(name, ["-Command", expression], timeout)
+    if code != 0 or not out.strip():
+        return []
+    try:
+        parsed = json.loads(out)
+    except ValueError:
+        return []
+    return parsed if isinstance(parsed, list) else [parsed]
+
+
+def display_adapters(name: str) -> list[dict]:
+    return ps_json(name, "Get-CimInstance Win32_VideoController | "
+                         "Select-Object Name,PNPDeviceID | ConvertTo-Json -Compress")
+
+
+def monitors(name: str) -> list[dict]:
+    return ps_json(name, "Get-PnpDevice -Class Monitor -PresentOnly | "
+                         "Select-Object Status,FriendlyName,InstanceId | "
+                         "ConvertTo-Json -Compress")
+
+
+def lg_service(name: str) -> list[dict]:
+    return ps_json(name, "Get-Service | Where-Object { $_.DisplayName -like "
+                         "'*Looking Glass*' } | Select-Object Name,Status | "
+                         "ConvertTo-Json -Compress")
+
+
+def choose_gpu(name: str) -> str | None:
+    """Which adapter the indirect display should render on -- asked, not assumed.
+
+    THE DEFAULT USED TO BE THIS MACHINE'S CARD, spelled out in vdd.ps1's
+    parameters, which is the machine-specific value K9 forbids and one that
+    cannot be derived from sysfs: it is Windows' friendly name for the card, and
+    only Windows knows it. So the guest is asked.
+
+    The failure this prevents is measured and quiet: vdd.ps1 that cannot match
+    the name it was given falls back to `default`, `default` lets Windows pick,
+    Windows picks QXL, and the symptom is "Looking Glass connects and no frames
+    ever arrive" -- three layers away from the cause.
+
+    It discovers rather than verifies (core/probe.py's rule, guest side): it
+    does not look for the card it expects, it looks at what is there. With no
+    passthrough adapter present -- the cardless rehearsal -- it says so and uses
+    the one adapter that exists. With more than one candidate it refuses to
+    guess, because guessing wrong is the silent failure above.
+    """
+    adapters = display_adapters(name)
+    if not adapters:
+        say("  ekran bağdaştırıcıları okunamadı")
+        return None
+    for a in adapters:
+        say(f"  bağdaştırıcı: {a.get('Name')}  [{a.get('PNPDeviceID')}]")
+
+    candidates = [a for a in adapters
+                  if QXL_HWID not in (a.get("PNPDeviceID") or "").upper()
+                  and not (a.get("PNPDeviceID") or "").upper().startswith("ROOT\\")]
+    if len(candidates) == 1:
+        return candidates[0].get("Name")
+    if not candidates:
+        if len(adapters) == 1:
+            say("  devredilmiş kart yok -- kartsız prova, tek bağdaştırıcı seçiliyor")
+            return adapters[0].get("Name")
+        say("  devredilmiş kart yok ve birden çok bağdaştırıcı var")
+        return None
+    say(f"  {len(candidates)} aday var -- tahmin edilmez, --gpu-name ile ver")
+    return None
+
+
+def vdd_monitor(name: str) -> dict | None:
+    """The monitor the Virtual Display Driver creates, if it has appeared.
+
+    This is the evidence half of the step. `msiexec exit=0` and a driver that
+    installed without error are both claims; a monitor device in the guest's own
+    inventory is what the next script actually depends on. Matched loosely on
+    purpose -- the friendly name is upstream's to change -- and the whole
+    inventory is printed when nothing matches, so a renamed device shows up as a
+    name to read rather than as "no display".
+    """
+    found = monitors(name)
+    for m in found:
+        friendly = (m.get("FriendlyName") or "")
+        if "VDD" in friendly.upper() or "VIRTUAL DISPLAY" in friendly.upper():
+            return m
+    for m in found:
+        say(f"  monitör: {m.get('Status')} {m.get('FriendlyName')}")
+    return None
+
+
+def run_guest_script(name: str, script: Path, args: list[str],
+                     timeout: int) -> bool:
+    """Push one script and run it, reporting what it said either way."""
+    remote = f"{GUEST_DIR}\\{script.name}"
+    say(f"{script.name} -> {remote}")
+    if not guest_push(name, script, remote):
+        return False
+
+    code, out, err = powershell(name, ["-File", remote, *args], timeout)
+    for line in (out or "").splitlines():
+        print(f"    | {line}")
+    if err.strip():
+        for line in err.strip().splitlines():
+            print(f"    ! {line}")
+    if code is None:
+        say(f"{script.name}: {timeout} sn içinde bitmedi")
+        return False
+    if code != 0:
+        say(f"{script.name}: çıkış kodu {code}")
+        return False
+    return True
+
+
+def guest_setup(a, name: str) -> int:
+    """Drive the three guest scripts in order, stopping at the first failure.
+
+    THE ORDER IS A DEPENDENCY, NOT A PREFERENCE. display-layout has nothing to
+    isolate until VDD's screen exists, and Looking Glass captures whatever the
+    desktop is at the time. So the round does not walk the list -- it checks
+    that each step produced the thing the next one needs, and the check is the
+    guest's own inventory rather than the installer's exit code.
+
+    The one retry is deliberate and bounded: an indirect display driver that has
+    installed cleanly sometimes needs the boot to enumerate, so a missing
+    monitor is worth exactly one reboot before it counts as a failure.
+    """
+    if not agent_ping(name):
+        die(f"'{name}' ajanı yanıt vermiyor -- önce build")
+
+    users = console_users(name)
+    if not users:
+        die("misafirde açık konsol oturumu yok -- display-layout ekrana "
+            f"ulaşamaz. Önce: {sys.argv[0]} --name {name} autologon")
+    say(f"konsol oturumu: {', '.join(users)}")
+
+    # mkdir exits 1 on a directory that already exists, which is the state we
+    # want; only silence from the agent is a failure worth stopping for.
+    code, _, _ = guest_exec(name, "cmd.exe", ["/c", "mkdir", GUEST_DIR])
+    if code is None:
+        die(f"{GUEST_DIR} oluşturulamadı -- ajan cevap vermedi")
+
+    gpu = a.gpu_name or choose_gpu(name)
+    if not gpu:
+        die("VDD'nin render edeceği bağdaştırıcı belirlenemedi -- --gpu-name ver")
+    say(f"VDD bağdaştırıcısı: {gpu}")
+
+    # 1. VDD
+    if not run_guest_script(name, WINDOWS / "vdd.ps1",
+                            ["-GpuName", gpu], timeout=900):
+        return 1
+    monitor = vdd_monitor(name)
+    if monitor is None:
+        say("VDD ekranı görünmüyor -- bir kez yeniden başlatılıp tekrar bakılacak")
+        workdir = IMAGES / f"{name}-unattend"
+        workdir.mkdir(parents=True, exist_ok=True)
+        if not reboot_and_wait(name, workdir, 10):
+            say("ADIM DÜŞTÜ -- yeniden başlatma doğrulanamadı.")
+            return 1
+        monitor = vdd_monitor(name)
+    if monitor is None:
+        say("ADIM DÜŞTÜ -- VDD ekranı yeniden başlatmadan sonra da yok.")
+        return 1
+    say(f"VDD ekranı: {monitor.get('Status')} {monitor.get('FriendlyName')}")
+
+    # 2. Looking Glass host
+    if not run_guest_script(name, WINDOWS / "looking-glass.ps1", [], timeout=600):
+        return 1
+    services = lg_service(name)
+    running = [s for s in services if str(s.get("Status")) in ("4", "Running")]
+    if not running:
+        say(f"ADIM DÜŞTÜ -- LG host servisi çalışmıyor ({services or 'servis yok'}).")
+        return 1
+    say(f"LG host servisi: {running[0].get('Name')} çalışıyor")
+
+    # 3. one display
+    if not run_guest_script(name, WINDOWS / "display-layout.ps1", [], timeout=600):
+        say("ADIM DÜŞTÜ -- ekran topolojisi kurulamadı.")
+        say(f"  geri alma: misafirde {GUEST_DIR}\\display-layout.ps1 -Reattach")
+        return 1
+
+    say("KURULUM GEÇTİ -- VDD ekranı var, LG host çalışıyor, misafir tek ekranda.")
+    return 0
+
+
+# --------------------------------------------------------------------------- #
 # subcommands
 # --------------------------------------------------------------------------- #
 
@@ -679,8 +929,17 @@ def cmd_build(a):
         return 1
 
     say("TUR GEÇTİ -- ajan ulaşılabilir, konsol oturumu açık, autologon kalıcı.")
-    say("  sıradaki: guest/windows/vdd.ps1 / looking-glass.ps1")
-    return 0
+
+    # THE GUEST-SIDE SETUP IS OPT-IN, and the reason is the domain this round
+    # builds: it carries no ivshmem device, so looking-glass.ps1 refuses at its
+    # own precondition and the round would end in a failure that means nothing.
+    # A tool whose normal outcome is a red line teaches people to skip reading
+    # the line. `setup` runs it whenever the guest is ready for it.
+    if not a.setup:
+        say(f"  sıradaki: {sys.argv[0]} --name {a.name} setup")
+        return 0
+    print()
+    return guest_setup(a, a.name)
 
 
 def cmd_status(a):
@@ -785,6 +1044,10 @@ def main():
     b.add_argument("--timeout", type=int, default=45, help="dakika")
     b.add_argument("--force", action="store_true",
                    help="tanımlıysa önce temizle")
+    b.add_argument("--setup", action="store_true",
+                   help="tur bitince misafir betiklerini de sür")
+    b.add_argument("--gpu-name", default="",
+                   help="VDD'nin render edeceği bağdaştırıcı (boşsa misafirde keşfedilir)")
     b.set_defaults(func=cmd_build)
 
     s = sub.add_parser("status", help="domain ve ajan durumu")
@@ -799,6 +1062,11 @@ def main():
     al.add_argument("--password", default="")
     al.add_argument("--password-file", default="")
     al.set_defaults(func=cmd_autologon)
+
+    st = sub.add_parser("setup", help="misafir betiklerini sür (VDD, LG, ekran)")
+    st.add_argument("--gpu-name", default="",
+                    help="VDD'nin render edeceği bağdaştırıcı (boşsa misafirde keşfedilir)")
+    st.set_defaults(func=lambda a: guest_setup(a, a.name))
 
     c = sub.add_parser("clean", help="domain + disk + çalışma dizini sil")
     c.set_defaults(func=cmd_clean)

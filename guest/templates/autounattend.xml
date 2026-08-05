@@ -199,7 +199,7 @@
         <RunSynchronousCommand wcm:action="add">
           <Order>2</Order>
           <Description>stage SetupComplete.cmd from the helper ISO</Description>
-          <Path>cmd /c for %i in (D E F G H I) do @if exist %i:\qemu-vfio\setupcomplete.cmd copy /y %i:\qemu-vfio\setupcomplete.cmd C:\Windows\Setup\Scripts\SetupComplete.cmd</Path>
+          <Path>cmd /c for %i in (D E F G H I) do @if exist %i:\vfioctl\setupcomplete.cmd copy /y %i:\vfioctl\setupcomplete.cmd C:\Windows\Setup\Scripts\SetupComplete.cmd</Path>
         </RunSynchronousCommand>
       </RunSynchronous>
     </component>
