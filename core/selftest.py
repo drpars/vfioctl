@@ -194,6 +194,35 @@ def own_card_holders() -> list[str]:
     return held
 
 
+# What the kernel and the session say when a handover goes wrong. NVRM lines are
+# the honest signal the hook's own lsmod gate cannot give: "Attempting to remove
+# device ... with non-zero usage count" means the card was still held, and it
+# appears even on the runs where a later lsmod comes back clean -- because the
+# kernel got there by killing the holder. The rest catch the failure this test
+# exists for: the greeter's X server aborting and taking the session with it.
+JOURNAL_SIGNALS = re.compile(
+    r"NVRM|non-zero usage count|vfio|Xorg|caught signal|SIGABRT|libvirt",
+    re.IGNORECASE,
+)
+
+
+def journal_since(since: str) -> list[str]:
+    """Kernel and daemon lines worth reading after a round. Needs no root here:
+    a member of wheel/adm reads the system journal."""
+    rc, out = _sh(["journalctl", "--since", since, "--no-pager"], timeout=120)
+    if rc != 0:
+        return [f"(journalctl okunamadı: {out.splitlines()[0] if out else rc})"]
+    return [line for line in out.splitlines() if JOURNAL_SIGNALS.search(line)]
+
+
+def session_state() -> str:
+    """The display manager and its X server -- the two that die together when a
+    handover takes the greeter's card away."""
+    sddm = _sh(["systemctl", "is-active", "sddm"], timeout=10)[1]
+    xorg = _sh(["pgrep", "-c", "Xorg"], timeout=10)[1] or "0"
+    return f"sddm={sddm} Xorg={xorg} süreç"
+
+
 def hook_log_lines() -> int:
     try:
         return sum(1 for _ in HOOK_LOG.open("rb"))
@@ -351,6 +380,7 @@ def one_round(target: Target, number: int, comp_before: str | None) -> str:
     """Empty string when the round was clean, otherwise why it was not."""
     print(f"\n\n=== TUR {number}  {_now()}")
     hook_before = hook_log_lines()
+    started_at = _now()
 
     if not preflight(target):
         return "preflight geçmedi"
@@ -401,11 +431,20 @@ def one_round(target: Target, number: int, comp_before: str | None) -> str:
             verdict = (f"geri: compositor öldü ya da yeniden başladı "
                        f"({comp_before} → {comp_now})")
 
+    print(f"   masaüstü: {session_state()}")
+
     new_lines = hook_log_since(hook_before)
     waits = sum(1 for line in new_lines if "waiting up to" in line)
     print(f"\n== Hook günlüğü ({len(new_lines)} yeni satır, {waits} bekleme)")
     for line in new_lines:
         print(f"   {line}")
+
+    signals = journal_since(started_at)
+    print(f"\n== Journal — önemli satırlar ({len(signals)})")
+    for line in signals[-40:]:
+        print(f"   {line}")
+    if not signals:
+        print("   (hiçbiri = temiz)")
     return verdict
 
 
@@ -469,7 +508,10 @@ def run(rounds: int = 5, domain: str = "win11", compositor: str = "Hyprland",
     comp_before = pid_of(compositor)
     poller_j0 = cpu_jiffies(poller_pid)
 
+    # Printed before anything can go wrong, not only in the summary: if the
+    # session dies mid-run this line is how the reader finds what happened.
     print(f"\n\n########## {_now()}  {rounds} tur  profil={p.name}")
+    print(f"günlük (paylaşılacak tek dosya): {LOG}")
     print(f"kart: {install_mod.driver_of(layout.dgpu)}   "
           f"domain: {_virsh(['domstate', domain])[1]}   "
           f"{compositor}: {comp_before}")
