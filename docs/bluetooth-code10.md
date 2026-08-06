@@ -193,23 +193,35 @@ arayüz başına `libusb_kernel_driver_active() != 1` ise `continue`. Bu erken
 `/var/log/libvirt/qemu/<domain>.log` (QEMU stderr oraya düşüyor; `usb-host`
 aygıtının `loglevel` özelliği varsayılan olarak `LIBUSB_LOG_LEVEL_WARNING`):
 
-- **Var:** `libusb_set_interface_alt_setting: -5 [NOT_FOUND]`, tekrarlanıyor.
-  Bu çağrı arayüz **claim edilmemişse** ya da istenen alt setting yoksa
-  `NOT_FOUND` döner; ölçüldü ki radyonun arayüz 1'inde **7 alternate setting**
-  var (izokron SCO arayüzü, Windows'un BT yığınının sürdüğü yer), yani kalan
-  okuma "arayüz claim edilmemişti" — adayın öngördüğü aşağı akış.
-- **Yok:** `libusb_detach_kernel_driver:` hata satırı. Host tarafında sürücünün
-  bağlı kaldığı ölçülmüştü, yani detach başarılı olmadı **ve hata da
-  bildirmedi** — kaynakta bunu bırakan yalnızca iki yol var, ikisi de yukarıdaki
-  iki koruma. Adayın **lehine**.
-- **Yok:** `device unconfigured` ve `get configuration failed, errno=`, yani
-  adayın öngördüğü libusb dizeleri. **Aleyhine, ama zayıf** — log'da libusb'nin
-  kendi kaydedicisinden geldiği kesin tek satır bile yok, yani pozitif kontrol
-  eksik.
+- **Var, ama ayırt edici DEĞİL:** `libusb_set_interface_alt_setting: -5
+  [NOT_FOUND]`, tekrarlanıyor. Aynı log'daki `-device usb-host,…` başlatma
+  satırlarıyla sıralandığında örneklerin **sonuncusu tek `hostbus=/hostaddr=`
+  başlatmasından sonra** düşüyor — yani çalışan kipte de görülüyor. En olası
+  okuma zararsız: radyonun arayüz 1'inde 7 alternate setting var (izokron SCO
+  arayüzü) ve SCO alt setting'i iki kipte de tutmuyor. **Bu satır arızanın
+  parmak izi değil.**
+- **Yok, ve bu da bilgi vermiyor:** `device unconfigured` ile
+  `get configuration failed, errno=`, yani adayın öngördüğü libusb dizeleri.
+  Log'da libusb'nin **kendi** kaydedicisinden gelen tek satır bile olmadığı için
+  pozitif kontrol kurulamıyor — adayı log üzerinden onaylama/çürütme yolu
+  tükendi.
+- **Yok, VE BU BİLGİ:** `libusb_detach_kernel_driver:` hata satırı. Farkı şu:
+  QEMU'nun kendi hata yardımcısının log'a ulaştığı **biliniyor** — yukarıdaki
+  `-5` satırları aynı biçimi kullanıyor. Yani detach **hiç hata bildirmedi**; ve
+  host tarafında sürücünün bağlı kaldığı ölçülmüştü, yani **başarılı da olmadı.**
 
-**Ayırt edici değil:** arayüzün claim edilememesinin ikinci bir yolu daha var —
-host sürücüsü hâlâ bağlıyken `libusb_claim_interface()` `-EBUSY` döner. Log
-satırı **aşağı akışı doğruluyor, kökü değil.**
+Kaynakta bu ikisini birlikte bırakan yalnızca iki yol var, ve arıza bugün bu iki
+dala inmiş durumda:
+
+1. descriptor kapısındaki erken `return` — yukarıdaki aday; ya da
+2. **`libusb_kernel_driver_active()`'ın 1 dönmemesi**, yani QEMU'nun "bu arayüzde
+   çekirdek sürücüsü yok" sanması, sürücü fiilen bağlıyken.
+
+İkisi de wrap edilmiş fd'nin sysfs'siz oluşuna bakıyor. Ayıracak ölçüm ucuz
+değil: ya fd kipinde bilerek bir tur (`LIBUSB_DEBUG=4`, ki libusb'nin belgeli
+davranışına göre QEMU'nun `loglevel` özelliğini ezer), ya da QEMU'suz —
+`libusb_wrap_sys_device()` ardından `libusb_get_active_config_descriptor()` ve
+`libusb_kernel_driver_active()` çağıran küçük bir program.
 
 ## Bilinen risk — ve arıza kipinin adı var
 
