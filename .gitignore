@@ -19,6 +19,13 @@ autounattend.xml
 __pycache__/
 *.pyc
 
+# makepkg builds in place, because the PKGBUILD packages the checkout it sits
+# in rather than a downloaded source. These four are its scratch space.
+pkg/
+src/
+*.pkg.tar.*
+*.log
+
 # Editor / system leftovers
 *.swp
 *~
