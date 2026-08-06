@@ -12,6 +12,27 @@ hands a laptop's discrete GPU to a Windows guest.
 > + sürülmesi** (`guest/`). Kalan: ek cihaz devri (Faz 4) — envanteri çıkaran
 > yarısı yazıldı (`inventory`), **devreden yarısı henüz yok.**
 
+## Kurulum
+
+```sh
+git clone https://github.com/drpars/vfioctl && cd vfioctl && makepkg -si
+```
+
+`makepkg` `base-devel` ister; `depends` yalnızca `python` ve `libvirt`, geri
+kalan her şey `optdepends` — çünkü araç eksik olanı ölçüp komutu basar, kurmaz.
+
+Ağaç tek yere (`/usr/lib/vfioctl`) kurulur ve `/usr/bin/vfioctl` ona
+symlink'tir; ikisi de zorunlu, gerekçesi [PKGBUILD](PKGBUILD)'in başlığında.
+Kurulduktan sonra komut `vfioctl`; aşağıdaki örnekler klondan koşmayı gösterdiği
+için `./vfioctl` yazar, ikisi aynı şeydir.
+
+**Otomatik güncelleme kanalı yoktur.** Araç AUR'da değil, yani `pacman -Syu`
+onu tazelemez; güncelleme `git pull && makepkg -si`. Bu bilinçli bir bedel —
+paket olarak yayımlamak, aracın vaat vermediği bir taşınabilirliği ima ederdi
+(→ [Kapsam](#kapsam--ve-kapsamda-olmayan)). Düzeltmelerin bir kısmı zaten kod
+değil **belge** olarak yolculuk ediyor (→ [Bilinen sorunlar](#bilinen-sorunlar)),
+onlar da aynı yolla ulaşır: depoya yeniden bakarak.
+
 ## Neden ayrı bir proje
 
 Passthrough kurulumu iki yarıya bölünmüştü: host yapılandırması bir Arch
