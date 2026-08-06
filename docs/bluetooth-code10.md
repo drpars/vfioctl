@@ -4,10 +4,11 @@
 under its correct name but fails to start (Code 10 / `CM_PROB_FAILED_START`,
 `0xC0000001`). Removing the `usb-host.hostdevice` QEMU capability from the
 domain makes it work: libvirt then addresses the device with
-`hostbus=`/`hostaddr=` instead of an already-open file descriptor. **The
-workaround is empirical and reproducible; the cause is not known.** Five
-explanations were measured and ruled out — they are listed below so nobody
-spends a session re-deriving them.
+`hostbus=`/`hostaddr=` instead of a device-node path that QEMU opens and feeds
+to `libusb_wrap_sys_device()`. **The workaround is empirical and reproducible;
+the root cause is not known**, though a source-level candidate is described
+below. Five explanations were measured and ruled out — they are listed so
+nobody spends a session re-deriving them.
 
 ---
 
@@ -67,8 +68,7 @@ Domain tanımına, domain düzeyinde:
 
 Yetenek, libvirt'in QEMU'ya cihazı **hangi adresleme kipiyle** verdiğini
 belirliyor. QEMU her iki kipte de `usb_host_open()` içinde koşulsuz
-`usb_host_detach_kernel()` çağırıyor (16 arayüz için `USBDEVFS_DISCONNECT`),
-ama sonuç aynı olmuyor:
+`usb_host_detach_kernel()` çağırıyor, ama sonuç aynı olmuyor:
 
 | Adresleme kipi | `1-4:1.0` sürücüsü | Host'ta `hci0` | Misafir |
 |---|---|---|---|
@@ -102,7 +102,7 @@ PnP'nin `OK` demesi tek başına yeterli sayılmadı. Radyo + **Microsoft Blueto
 Enumerator** + **RFCOMM Protocol TDI** + **LE Enumerator** hepsi `OK`, `bthserv`
 koşuyor. Enumerator'lar ancak radyo fiilen çalışırken doğuyor.
 
-## Sebep bilinmiyor — ve elenenler bunun parçası
+## Sebep bilinmiyor — elenenler, ve bugünkü aday
 
 Geriye yalnızca olgu kalıyor: `hostbus`/`hostaddr` çalışıyor, `hostdevice=`
 çalışmıyor, aradaki farkın bu cihazda neyi değiştirdiği bilinmiyor. Aşağıdaki
@@ -129,17 +129,127 @@ beş açıklamanın **beşi de ölçülüp elendi**; yeniden türetilmesinler:
 kendisi devredildi ve yine Kod 10 + `STATUS_UNSUCCESSFUL` alındı. Arıza
 denetleyicide değil.
 
-Dışarıda belgeli değil. Yetenek kaldırmayı öneren tek rapor (unRAID, Intel
-3168, Windows misafiri, aynı `0xC0000001`) düzeltmenin **işe yaradığını**
-biliyor, **neden** işe yaradığını bilmiyor.
+### Bu düzeltme yaygın, ve kaynağı libvirt'in kendisi
 
-## Bilinen risk
+Bu dosyanın erken bir sürümü *"dışarıda belgeli değil, öneren tek rapor unRAID"*
+diyordu. Yanlışmış:
 
-`<qemu:capabilities>` libvirt'te bir *test* olanağı olarak belgeli. Kalıcı bir
-kurulumu ona dayandırmak, belgelenmemiş bir yüzeye bağlanmak demek — bugün
-çalışıyor, bir libvirt sürümünde sessizce değişebilir. Ölçülen asimetri QEMU
-tarafında bir kusur gibi durduğu için doğru uzun vadeli yol muhtemelen yukarı
-akışa bildirmek.
+- **Reçeteyi libvirt bakımcısı vermiş.** libvirt GitLab
+  [issue #99](https://gitlab.com/libvirt/libvirt/-/issues/99) (2020-11-23) aynı
+  arıza sınıfı; bildiren kişi komut satırı deltasını birebir görmüş, Michal
+  Prívozník yetenek-silmeyi orada önermiş.
+- **Arızanın doğum commit'i belli:** libvirt
+  [`bfb1ab1df1`](https://gitlab.com/libvirt/libvirt/-/commit/bfb1ab1df12e8dccfde42d1a6019bf2e628bf366)
+  "qemu: Use .hostdevice attribute for usb-host" (2020-09-09, ilk 6.8.0).
+  Gerekçesi cihazlarla ilgili değil: mount namespace + libusb önbelleği
+  (rhbz 1595525, 1877218).
+- **Yaygın:** `usb-host.hostdevice` dizesi GitHub kod aramasında 386 dosyada;
+  ~15 bağımsız benimseyen (2021-08 → 2025-05), aralarında Intel'in kendi
+  [`kvm-multios`](https://github.com/intel/kvm-multios) deposu (üç üretim
+  Android misafir XML'inde).
+- **Cihaz ailesi Intel'le sınırlı değil** (`8087:0aa7`, `0029`, `0026`, `0032`,
+  AX211, artı bir Cambridge Silicon Radio dongle'ı), **ve misafir işletim
+  sistemiyle ilgisi yok** — Linux misafirdeki yüzü `hci0: command 0xfc05 tx
+  timeout` / `Reading Intel version command failed (-110)`.
+
+### Sebep adayı — kaynakta doğrulandı, cihazda ölçülmedi
+
+libusb'nin `op_wrap_sys_device()`'ı — `hostdevice=`'in vardığı yer —
+`initialize_device(dev, busnum, devaddr, **NULL**, fd)` çağırıyor: `sysfs_dir`
+NULL (libusb v1.0.30, `os/linux_usbfs.c`). Sonucu:
+
+| | `hostbus/hostaddr` | `hostdevice=` |
+|---|---|---|
+| Aktif konfigürasyon nereden | sysfs `bConfigurationValue`, erken dönüş | **canlı `GET_CONFIGURATION` kontrol transferi** |
+| Cihaz 0 cevaplar + config-0 yoksa | olamaz | `priv->active_config = -1` → `NOT_FOUND`, **kalıcı** |
+
+`-1` oluşunca QEMU'da üç tüketici **sessizce** düşüyor: `usb_host_detach_kernel()`
+erken dönüyor (→ host sürücüsü bağlı kalır), `usb_host_claim_interfaces()`
+`LIBUSB_ERROR_NOT_FOUND`'u *"address state - ignore"* diye yutup **sıfır arayüz
+claim ederek** `USB_RET_SUCCESS` dönüyor, `usb_host_ep_update()` erken dönüyor.
+Misafirde `SET_CONFIGURATION` **başarılı** dönüyor, cihaz ep0 passthrough
+sayesinde **doğru adıyla** görünüyor, ama her bulk/interrupt transferi
+`default: USB_RET_STALL`'a düşüyor.
+
+`-1` kalıcı, çünkü `usb_host_set_config()` `bNumConfigurations != 1` olmadıkça
+`libusb_set_configuration()`'ı hiç çağırmıyor — onaracak tek yol koşmuyor.
+**Ölçüldü: `8087:0032` için `bNumConfigurations = 1`.**
+
+**Aday üç host tarafı ölçümün üçünü de tek bir başarısız çağrıdan türetiyor** ve
+yukarıdaki beş elemenin hiçbirine dokunmuyor (host sürücüsü önceden indirilmiş
+olsa da değişmemesi dahil). **Ama cihazda ölçülmedi.** Kalan soru dar:
+*bu radyo usbfs üzerinden `GET_CONFIGURATION`'a `0` mu cevaplıyor?* sysfs'in
+`bConfigurationValue=1` demesi bunu cevaplamaz — o çekirdeğin görüşü, teldeki
+cevap değil.
+
+**Bir düzeltme daha, aynı okumadan:** `usb_host_detach_kernel()`'in *çağrısı*
+koşulsuz (iki kipte de düz hat üzerinde), ama içindeki `USBDEVFS_DISCONNECT`
+ioctl'leri **iki kez korumalı** — descriptor çağrısı düşerse erken `return`, ve
+arayüz başına `libusb_kernel_driver_active() != 1` ise `continue`. Bu erken
+`return` adayın dayandığı kapı.
+
+### Log'da ne var, ne yok
+
+`/var/log/libvirt/qemu/<domain>.log` (QEMU stderr oraya düşüyor; `usb-host`
+aygıtının `loglevel` özelliği varsayılan olarak `LIBUSB_LOG_LEVEL_WARNING`):
+
+- **Var:** `libusb_set_interface_alt_setting: -5 [NOT_FOUND]`, tekrarlanıyor.
+  Bu çağrı arayüz **claim edilmemişse** ya da istenen alt setting yoksa
+  `NOT_FOUND` döner; ölçüldü ki radyonun arayüz 1'inde **7 alternate setting**
+  var (izokron SCO arayüzü, Windows'un BT yığınının sürdüğü yer), yani kalan
+  okuma "arayüz claim edilmemişti" — adayın öngördüğü aşağı akış.
+- **Yok:** `libusb_detach_kernel_driver:` hata satırı. Host tarafında sürücünün
+  bağlı kaldığı ölçülmüştü, yani detach başarılı olmadı **ve hata da
+  bildirmedi** — kaynakta bunu bırakan yalnızca iki yol var, ikisi de yukarıdaki
+  iki koruma. Adayın **lehine**.
+- **Yok:** `device unconfigured` ve `get configuration failed, errno=`, yani
+  adayın öngördüğü libusb dizeleri. **Aleyhine, ama zayıf** — log'da libusb'nin
+  kendi kaydedicisinden geldiği kesin tek satır bile yok, yani pozitif kontrol
+  eksik.
+
+**Ayırt edici değil:** arayüzün claim edilememesinin ikinci bir yolu daha var —
+host sürücüsü hâlâ bağlıyken `libusb_claim_interface()` `-EBUSY` döner. Log
+satırı **aşağı akışı doğruluyor, kökü değil.**
+
+## Bilinen risk — ve arıza kipinin adı var
+
+`<qemu:capabilities>` libvirt'te bir *test* olanağı olarak belgeli
+(`docs/drvqemu.rst`: *"meant for experiments only and should not be used in
+production"*). Riskin somut şekli şu, ve gürültülü olan yarısı yanıltıcı:
+
+- Bilinmeyen bir yetenek **adı** domain başlangıcında **sert hata** verir. Yani
+  bir *yeniden adlandırma* gürültülü olurdu.
+- **Ama libvirt bir yeteneği emekliye ayırırken adı silmez** — dizeyi bırakır,
+  yalnızca C enum'unu `X_QEMU_CAPS_*` yapar. Emsali listede zaten duruyor:
+  `"usb-host.bootindex", /* X_QEMU_CAPS_USB_HOST_BOOTINDEX */`.
+- Emeklilikten sonra bu satır **hâlâ ayrıştırılır, domain hâlâ başlar, ve `del`
+  sessiz bir no-op olur.** Kod 10 geri gelir, libvirt hiçbir yerde hata vermez.
+
+Bu teorik değil: libvirt 2026-05-05'te asgari QEMU'yu 7.2'ye çekti, `hostdevice`
+ise QEMU 5.1.0'dan (2020-06) beri var — yani bayrak artık her desteklenen
+QEMU'da koşulsuz doğru ve ders kitabı emeklilik adayı. **Semptomu bilmek tek
+savunma:** misafirde Kod 10 geri geldiğinde ilk bakılacak yer bu satırın hâlâ
+etkili olup olmadığıdır (`virsh dumpxml` satırı gösterir ama etkili olduğunu
+göstermez).
+
+### Daha dar kapsamlı alternatif — değerlendirildi, elendi
+
+`<qemu:override>` + `<qemu:property name='hostdevice' type='remove'/>` (libvirt
+≥ 8.2.0) aynı komut satırını **tek cihaz için** üretir ve `<qemu:capabilities>`'in
+aksine belgelidir. Ama uygulaması **yalnızca komut satırı yolunda**: USB hotplug
+`qemuBuildUSBHostdevDevProps()` → `qemuMonitorAddDeviceProps()` diye gidiyor ve o
+fonksiyona hiç uğramıyor. Yani **koşan misafire canlı takma özelliği kaybolur.**
+Yetenek silme ise `priv->qemuCaps`'e bir kez işlendiği için domain ömrü boyunca
+yaşıyor — canlı takmanın çalışmasının sebebi tam olarak bu.
+
+### Yukarı akışa bildirmek
+
+Doğru uzun vadeli yol bu, ama ucuz değil: QEMU `MAINTAINERS`'ta **USB bölümünün
+tamamı `S: Orphan`**, `hw/usb/host-libusb.c` v11.0.3 ile master arasında baytı
+baytına aynı ve son işlevsel değişikliği 2021-07-29, ve bisect edilmiş commit
+taşıyan bir issue 2025-09'dan beri cevapsız duruyor. İki sonucu: **QEMU'yu
+yükseltmek bu davranışı değiştirmez**, ve bir rapor muhtemelen yamasını taşımak
+zorunda. Yani bildirmenin gerçek ön koşulu yukarıdaki sebep adayının kapanması.
 
 ## vfioctl bunu neden yazmıyor
 

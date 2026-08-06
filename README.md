@@ -323,10 +323,12 @@ olduğu — koddan değerli; oralar okunmadan değiştirilmemeli.
 doğru adıyla görünüyor ama başlamıyor (`CM_PROB_FAILED_START` / `0xC0000001`);
 host tarafında `btusb` hiç düşmüyor. Çözüm domain tanımına tek satır —
 `<qemu:del capability='usb-host.hostdevice'/>` — ve **vfioctl bunu yazmaz,**
-elle yazılır. Düzeltme ampirik ve tekrarlanabilir, **sebebi bilinmiyor**; beş
-açıklama ölçülüp elendi. Her USB devri bunu istemiyor: aynı makinede bir fare
-alıcısı varsayılan kipte sorunsuz devredildi. Ayrıntı, ölçümler, elenen
-açıklamalar ve bilinen risk → [docs/bluetooth-code10.md](docs/bluetooth-code10.md).
+elle yazılır. Düzeltme ampirik ve tekrarlanabilir, **kök sebebi bilinmiyor** —
+beş açıklama ölçülüp elendi, ve kaynakta doğrulanmış ama cihazda ölçülmemiş bir
+aday var. Her USB devri bunu istemiyor: aynı makinede bir fare alıcısı
+varsayılan kipte sorunsuz devredildi. Ayrıntı, ölçümler, elenen açıklamalar,
+sebep adayı ve bilinen risk (satırın bir gün **sessizce** etkisizleşme kipi
+dahil) → [docs/bluetooth-code10.md](docs/bluetooth-code10.md).
 
 ## Yol haritası
 
