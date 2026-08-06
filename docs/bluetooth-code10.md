@@ -151,6 +151,13 @@ diyordu. Yanlışmış:
   AX211, artı bir Cambridge Silicon Radio dongle'ı), **ve misafir işletim
   sistemiyle ilgisi yok** — Linux misafirdeki yüzü `hci0: command 0xfc05 tx
   timeout` / `Reading Intel version command failed (-110)`.
+- **İki kipin bilgi olarak denk olmadığı yukarı akışta kayıtlı.** QEMU
+  [`202d69a715`](https://github.com/qemu/qemu/commit/202d69a715a4b1824dcd7ec1683d027ed2bae6d3)
+  (2020-08-24, rhbz 1871090): *"libusb_get_device_speed() does not work for
+  libusb_wrap_sys_device() devices"*, çözümü `USBDEVFS_GET_SPEED` ioctl'i ve
+  **yalnızca fd yolunda** (`if (hostfd && libusb_speed == 0)`), bugünkü
+  master'da hâlâ orada. Aynı sınıftan başka bir kusur, aynı kökten. **Emsal,
+  açıklama değil.**
 
 ### Sebep adayı — kaynakta doğrulandı, cihazda ölçülmedi
 
@@ -190,8 +197,7 @@ arayüz başına `libusb_kernel_driver_active() != 1` ise `continue`. Bu erken
 
 ### Log'da ne var, ne yok
 
-`/var/log/libvirt/qemu/<domain>.log` (QEMU stderr oraya düşüyor; `usb-host`
-aygıtının `loglevel` özelliği varsayılan olarak `LIBUSB_LOG_LEVEL_WARNING`):
+`/var/log/libvirt/qemu/<domain>.log` (QEMU stderr oraya düşüyor):
 
 - **Var, ama ayırt edici DEĞİL:** `libusb_set_interface_alt_setting: -5
   [NOT_FOUND]`, tekrarlanıyor. Aynı log'daki `-device usb-host,…` başlatma
@@ -200,28 +206,51 @@ aygıtının `loglevel` özelliği varsayılan olarak `LIBUSB_LOG_LEVEL_WARNING`
   okuma zararsız: radyonun arayüz 1'inde 7 alternate setting var (izokron SCO
   arayüzü) ve SCO alt setting'i iki kipte de tutmuyor. **Bu satır arızanın
   parmak izi değil.**
-- **Yok, ve bu da bilgi vermiyor:** `device unconfigured` ile
-  `get configuration failed, errno=`, yani adayın öngördüğü libusb dizeleri.
-  Log'da libusb'nin **kendi** kaydedicisinden gelen tek satır bile olmadığı için
-  pozitif kontrol kurulamıyor — adayı log üzerinden onaylama/çürütme yolu
-  tükendi.
+- **Yok, ve yokluğu YAPISAL — bir eşik meselesi değil:** `device unconfigured`
+  ile `get configuration failed, errno=`, yani adayın öngördüğü libusb dizeleri.
+  Sebebi şu: QEMU'nun `usb-host` aygıtındaki `loglevel` özelliği **ölü kod.**
+  `static uint32_t loglevel` `usb_host_init()` içinde libusb'ye veriliyor, ama
+  cihaz özelliği ondan **sonra** atanıyor ve `usb_host_init()` sonraki
+  çağrılarda erken dönüyor — libusb'nin log seviyesi ömür boyu `NONE` kalıyor.
+  Yani bu yol kalıcı olarak bilgi vermez; adayı log üzerinden onaylama/çürütme
+  yolu **kapalı**, pozitif kontrol kurulamaz.
 - **Yok, VE BU BİLGİ:** `libusb_detach_kernel_driver:` hata satırı. Farkı şu:
   QEMU'nun kendi hata yardımcısının log'a ulaştığı **biliniyor** — yukarıdaki
   `-5` satırları aynı biçimi kullanıyor. Yani detach **hiç hata bildirmedi**; ve
   host tarafında sürücünün bağlı kaldığı ölçülmüştü, yani **başarılı da olmadı.**
 
-Kaynakta bu ikisini birlikte bırakan yalnızca iki yol var, ve arıza bugün bu iki
-dala inmiş durumda:
+Kaynakta bu ikisini birlikte bırakan yalnızca iki yol vardı — **ve ikincisi
+kaynaktan çürüdü, arıza tek mekanizmaya indi:**
 
-1. descriptor kapısındaki erken `return` — yukarıdaki aday; ya da
-2. **`libusb_kernel_driver_active()`'ın 1 dönmemesi**, yani QEMU'nun "bu arayüzde
-   çekirdek sürücüsü yok" sanması, sürücü fiilen bağlıyken.
+1. descriptor kapısındaki erken `return` — yukarıdaki aday. **Ayakta.**
+2. ~~`libusb_kernel_driver_active()`'ın 1 dönmemesi~~ — **ÇÜRÜK.**
+   `op_kernel_driver_active()` (`os/linux_usbfs.c`) saf bir `USBDEVFS_GETDRIVER`
+   ioctl'i: `sysfs_dir`'e, `priv->active_config`'e, cihazın nasıl yaratıldığına
+   **hiç bakmıyor**. Çekirdek tarafı bağımsız olarak aynı yönde
+   (`proc_getdriver()`, `devio.c`: yalnızca arayüze bağlı sürücüye bakar).
+   fd'den wrap edilmiş olmak bu cevabı değiştiremez.
 
-İkisi de wrap edilmiş fd'nin sysfs'siz oluşuna bakıyor. Ayıracak ölçüm ucuz
-değil: ya fd kipinde bilerek bir tur (`LIBUSB_DEBUG=4`, ki libusb'nin belgeli
-davranışına göre QEMU'nun `loglevel` özelliğini ezer), ya da QEMU'suz —
-`libusb_wrap_sys_device()` ardından `libusb_get_active_config_descriptor()` ve
-`libusb_kernel_driver_active()` çağıran küçük bir program.
+QEMU'daki sıra da bunu destekliyor: descriptor kapısı `kernel_driver_active`'ten
+**önce** ve sessizce dönüyor — yani "detach hata bildirmedi ama başarılı da
+olmadı" gözlemini aday **tek başına** açıklıyor.
+
+### Ayıracak ölçüm — artık ucuz, ve tek bayta indi
+
+Aday, radyonun `GET_CONFIGURATION`'a **başarıyla `0x00`** cevaplamasını
+gerektiriyor. Stall/timeout/hata zararsız olurdu (libusb
+`config_descriptors[0].bConfigurationValue` = 1'e düşer), ve takma ile geri alma
+arasındaki 82 saniyede çekirdek günlüğünün boş olması timeout/EIO'yu zaten
+eliyor. İki ölçüm yolu, ikisi de **VM'siz, kartsız, libvirt'siz:**
+
+- **`usbfs_snoop` modül parametresi**
+  (`/sys/module/usbcore/parameters/usbfs_snoop`, çalışma anında yazılabilir) —
+  kontrol URB'sini **ve dönen baytı** basar;
+- **~15 satırlık bir userspace programı** — `usbdev_open()` claim/dışlayıcılık
+  denetimi yapmıyor ve `check_ctrlrecip()` `USB_RECIP_DEVICE`'ı gate etmiyor,
+  yani `btusb` bağlıyken gönderilebilir.
+
+Bedeli gerçek bir kontrol transferi, yani radyonun anlık bozulma ihtimali.
+**Kaynak okuma tükendi** — bu soruyu cevaplayan başka yol yok.
 
 ## Bilinen risk — ve arıza kipinin adı var
 
@@ -254,14 +283,35 @@ fonksiyona hiç uğramıyor. Yani **koşan misafire canlı takma özelliği kayb
 Yetenek silme ise `priv->qemuCaps`'e bir kez işlendiği için domain ömrü boyunca
 yaşıyor — canlı takmanın çalışmasının sebebi tam olarak bu.
 
-### Yukarı akışa bildirmek
+### Yukarı akışa bildirmek — adres QEMU değil, libusb
 
-Doğru uzun vadeli yol bu, ama ucuz değil: QEMU `MAINTAINERS`'ta **USB bölümünün
-tamamı `S: Orphan`**, `hw/usb/host-libusb.c` v11.0.3 ile master arasında baytı
-baytına aynı ve son işlevsel değişikliği 2021-07-29, ve bisect edilmiş commit
-taşıyan bir issue 2025-09'dan beri cevapsız duruyor. İki sonucu: **QEMU'yu
-yükseltmek bu davranışı değiştirmez**, ve bir rapor muhtemelen yamasını taşımak
-zorunda. Yani bildirmenin gerçek ön koşulu yukarıdaki sebep adayının kapanması.
+Doğru uzun vadeli yol bu, ama sırası var ve **adresi ilk sanılan yer değil.**
+
+**QEMU'ya bildirmek tek başına muhtemelen bekler:** `MAINTAINERS`'ta USB
+bölümünün tamamı `S: Orphan`, `hw/usb/host-libusb.c` v11.0.3 ile master arasında
+baytı baytına aynı, son işlevsel değişikliği 2021-07-29, ve bisect edilmiş commit
+taşıyan bir issue 2025-09'dan beri cevapsız. İki sonucu: **QEMU'yu yükseltmek bu
+davranışı değiştirmez**, ve rapor muhtemelen yamasını taşımak zorunda.
+
+**Asıl adres libusb:** kusur master'da canlı (`op_wrap_sys_device()` hâlâ
+`sysfs_dir`'i `NULL` geçiyor), orada bu hiç bildirilmemiş, ve proje canlı —
+v1.0.30 2026-05-17, `linux_usbfs.c`'ye son dokunuş 2026-07-17, dışarıdan açılan
+issue'lara medyan ilk cevap 3 saat.
+
+**Çerçeve kaderi belirliyor.** "VM'imde passthrough bozuk" ölüyor: birebir
+benzeri bir issue 33 dakikada kapsam dışı kapandı. Yaşayan çerçeve **API
+sözleşmesi** — `libusb_wrap_sys_device()`'ın doxygen'i *"no requests are sent
+over the bus"* diyor, oysa Linux'ta wrap yolu telde `GET_CONFIGURATION`
+gönderiyor. Rapor **"radyo 0 cevaplıyor" dememeli** (bu ölçülmedi), mimari
+asimetriyi söylemeli.
+
+**Sıra:** önce yukarıdaki tek bayt ölçülür. `0x00` gelirse mekanizma kapanır ve
+rapor kendini yazar; `0x01` gelirse **mekanizma iddiası hiç gönderilmez.**
+QEMU'ya rapor ayrı ve isteğe bağlı, yalnızca mekanizmadan bağımsız kusurla:
+`usb_host_detach_kernel()`'in hiç başarısızlık yolu yok — descriptor çağrısı
+düşünce sessizce dönüyor ve detach etmediği arayüzleri `detached = true` diye
+kaydediyor. (libusb'nin `AGENTS.md`'si AI yardımının `Assisted-by:` trailer'ıyla
+bildirilmesini şart koşuyor.)
 
 ## vfioctl bunu neden yazmıyor
 
