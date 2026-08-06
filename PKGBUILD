@@ -16,12 +16,18 @@
 # goes to /etc through sudo. If a future subcommand wants to write next to its
 # own code, this layout is what it breaks.
 #
-# WHY THERE IS NO source=() ARRAY. The repository is private today, so no
-# source line could resolve on anyone else's machine. This PKGBUILD builds the
-# checkout it sits in: clone, then `makepkg -si` in the clone. Publishing to
-# the AUR is a separate decision; if it is taken, the diff is small and local --
-# add source=() plus sha256sums=(), and change the two `cd "$startdir"` lines
-# to the extracted source directory. Nothing else here is checkout-specific.
+# WHY THERE IS NO source=() ARRAY. The repository is public, so a source line
+# would resolve; what is missing is not the ability but the intent. vfioctl is
+# deliberately not published to the AUR: profiles/ holds exactly one machine, so
+# the gate would come up closed for nearly every AUR user -- not broken, doctor
+# still runs and says why, but not what "install this package" implies. And the
+# one thing an AUR entry would buy, `pacman -Syu` carrying updates, is spelled
+# `git pull && makepkg -si` here, against the user's own clone. So this PKGBUILD
+# builds the checkout it sits in: clone, then `makepkg -si` in the clone. The
+# decision reopens the day a second machine lands in profiles/ and a run is
+# measured on it; the diff is small and local -- add source=() plus sha256sums=(),
+# and change the two `cd "$startdir"` lines to the extracted source directory.
+# Nothing else here is checkout-specific.
 #
 # WHY pkgver IS COMPUTED AT PARSE TIME instead of in a pkgver() function.
 # makepkg rewrites the pkgver= line of the PKGBUILD in place when a pkgver()
