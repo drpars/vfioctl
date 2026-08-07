@@ -317,9 +317,13 @@ fonksiyona hiç uğramıyor. Yani **koşan misafire canlı takma özelliği kayb
 Yetenek silme ise `priv->qemuCaps`'e bir kez işlendiği için domain ömrü boyunca
 yaşıyor — canlı takmanın çalışmasının sebebi tam olarak bu.
 
-### Yukarı akışa bildirmek — adres QEMU değil, libusb
+### Yukarı akışa bildirmek — BİLDİRİLDİ: libusb issue #1925
 
-Doğru uzun vadeli yol bu, ama sırası var ve **adresi ilk sanılan yer değil.**
+> **<https://github.com/libusb/libusb/issues/1925>** (2026-08-07). Cevap
+> bekleniyor; bakımcı iki yoldan hangisini seçerse yama teklif edildi.
+
+Doğru uzun vadeli yol buydu, ama sırası vardı ve **adresi ilk sanılan yer
+değildi.**
 
 **QEMU'ya bildirmek tek başına muhtemelen bekler:** `MAINTAINERS`'ta USB
 bölümünün tamamı `S: Orphan`, `hw/usb/host-libusb.c` v11.0.3 ile master arasında
