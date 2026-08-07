@@ -102,10 +102,14 @@ PnP'nin `OK` demesi tek başına yeterli sayılmadı. Radyo + **Microsoft Blueto
 Enumerator** + **RFCOMM Protocol TDI** + **LE Enumerator** hepsi `OK`, `bthserv`
 koşuyor. Enumerator'lar ancak radyo fiilen çalışırken doğuyor.
 
-## Sebep bilinmiyor — elenenler, ve bugünkü aday
+## Sebep — aday cihazda doğrulandı (2026-08-07)
 
-Geriye yalnızca olgu kalıyor: `hostbus`/`hostaddr` çalışıyor, `hostdevice=`
-çalışmıyor, aradaki farkın bu cihazda neyi değiştirdiği bilinmiyor. Aşağıdaki
+> **Bu bölümün başlığı "sebep bilinmiyor" idi; ölçüm yapıldı ve değişti.**
+> Radyo, usbfs üzerinden gönderilen `GET_CONFIGURATION`'a **başarıyla `0x00`**
+> cevaplıyor. Ölçüm ve sonuçları → aşağıdaki "Ayıracak ölçüm". Aşağıdaki beş
+> eleme yürürlükte kalıyor; aday artık onların yanında değil, **üstünde**.
+
+Olgu şuydu: `hostbus`/`hostaddr` çalışıyor, `hostdevice=` çalışmıyor. Aşağıdaki
 beş açıklamanın **beşi de ölçülüp elendi**; yeniden türetilmesinler:
 
 - **✗ Host sürücüsüyle çakışma.** `btusb` takmadan **önce** indirildi (arayüzler
@@ -159,7 +163,7 @@ diyordu. Yanlışmış:
   master'da hâlâ orada. Aynı sınıftan başka bir kusur, aynı kökten. **Emsal,
   açıklama değil.**
 
-### Sebep adayı — kaynakta doğrulandı, cihazda ölçülmedi
+### Sebep adayı — kaynakta doğrulandı, ve cihazda ölçüldü
 
 libusb'nin `op_wrap_sys_device()`'ı — `hostdevice=`'in vardığı yer —
 `initialize_device(dev, busnum, devaddr, **NULL**, fd)` çağırıyor: `sysfs_dir`
@@ -184,10 +188,11 @@ sayesinde **doğru adıyla** görünüyor, ama her bulk/interrupt transferi
 
 **Aday üç host tarafı ölçümün üçünü de tek bir başarısız çağrıdan türetiyor** ve
 yukarıdaki beş elemenin hiçbirine dokunmuyor (host sürücüsü önceden indirilmiş
-olsa da değişmemesi dahil). **Ama cihazda ölçülmedi.** Kalan soru dar:
-*bu radyo usbfs üzerinden `GET_CONFIGURATION`'a `0` mu cevaplıyor?* sysfs'in
-`bConfigurationValue=1` demesi bunu cevaplamaz — o çekirdeğin görüşü, teldeki
-cevap değil.
+olsa da değişmemesi dahil). Kalan tek soru dardı — *bu radyo usbfs üzerinden
+`GET_CONFIGURATION`'a `0` mu cevaplıyor?* — ve sysfs'in `bConfigurationValue=1`
+demesi onu cevaplamıyordu, çünkü o çekirdeğin görüşü, teldeki cevap değil.
+**2026-08-07'de telden ölçüldü: `0x00`, `status 0`** → yukarıdaki "Ayıracak
+ölçüm". Aday artık hipotez değil.
 
 **Bir düzeltme daha, aynı okumadan:** `usb_host_detach_kernel()`'in *çağrısı*
 koşulsuz (iki kipte de düz hat üzerinde), ama içindeki `USBDEVFS_DISCONNECT`
@@ -234,23 +239,52 @@ QEMU'daki sıra da bunu destekliyor: descriptor kapısı `kernel_driver_active`'
 **önce** ve sessizce dönüyor — yani "detach hata bildirmedi ama başarılı da
 olmadı" gözlemini aday **tek başına** açıklıyor.
 
-### Ayıracak ölçüm — artık ucuz, ve tek bayta indi
+### Ayıracak ölçüm — YAPILDI, ve cevap `0x00`
 
 Aday, radyonun `GET_CONFIGURATION`'a **başarıyla `0x00`** cevaplamasını
-gerektiriyor. Stall/timeout/hata zararsız olurdu (libusb
-`config_descriptors[0].bConfigurationValue` = 1'e düşer), ve takma ile geri alma
-arasındaki 82 saniyede çekirdek günlüğünün boş olması timeout/EIO'yu zaten
-eliyor. İki ölçüm yolu, ikisi de **VM'siz, kartsız, libvirt'siz:**
+gerektiriyordu. **2026-08-07'de ölçüldü ve tam olarak bu çıktı.**
 
-- **`usbfs_snoop` modül parametresi**
-  (`/sys/module/usbcore/parameters/usbfs_snoop`, çalışma anında yazılabilir) —
-  kontrol URB'sini **ve dönen baytı** basar;
-- **~15 satırlık bir userspace programı** — `usbdev_open()` claim/dışlayıcılık
-  denetimi yapmıyor ve `check_ctrlrecip()` `USB_RECIP_DEVICE`'ı gate etmiyor,
-  yani `btusb` bağlıyken gönderilebilir.
+Yol: `USBDEVFS_CONTROL` ioctl'i gönderen 45 satırlık bir C programı, libusb'nin
+`usbfs_get_active_config()`'inin gönderdiği isteğin **birebir aynısı**
+(`bmRequestType=0x80, bRequest=0x08, wValue=0, wIndex=0, wLength=1,
+timeout=1000`). Claim yok, detach yok, `SET_CONFIGURATION` yok. Program
+descriptor'dan `idVendor:idProduct`'ı doğrulayıp eşleşmezse çıkıyor, ve dönen
+bayta nöbetçi değer (`0xAA`) koyuyor — böylece "cihaz `0x00` cevapladı" ile
+"hiçbir şey yazılmadı" ayrılıyor. Root gerekiyor: `/dev/bus/usb/001/003`
+`crw-rw-r-- root:root` ve **`uaccess` ACL'i taşımıyor** (aynı bustaki klavye
+taşıyor — mekanizma çalışıyor, bu cihazı kapsamıyor).
 
-Bedeli gerçek bir kontrol transferi, yani radyonun anlık bozulma ihtimali.
-**Kaynak okuma tükendi** — bu soruyu cevaplayan başka yol yok.
+**İki bağımsız tanık aynı şeyi söyledi.** Programın kendi çıktısı:
+
+```
+node=/dev/bus/usb/001/003 idVendor=8087 idProduct=0032 bNumConfigurations=1
+ioctl=1 (aktarilan bayt) bConfigurationValue=0x00
+```
+
+ve `usbfs_snoop=Y` ile çekirdeğin kendi kaydı:
+
+```
+usb 1-4: control urb: bRequestType=80 bRequest=08 wValue=0000 wIndex=0000 wLength=0001
+usb 1-4: ep0 ctrl-in, length 1, timeout 1000
+usb 1-4: ep0 ctrl-in, actual_length 1, status 0
+usb 1-4: data: 00
+```
+
+**`status 0` — stall değil, timeout değil, başarılı bir sıfır cevabı.** Aynı
+anda çekirdeğin sysfs görüşü `bConfigurationValue = 1`, `bNumConfigurations = 1`.
+Yani config-0 yok, ve `dev_has_config0()` sıfır dönecek → `priv->active_config`
+**`-1`** olur. Adayın gerektirdiği her koşul cihazda sağlandı.
+
+**Bedeli sıfır çıktı:** ölçümden sonra `hci0` ayakta, iki arayüz de `btusb`'de,
+`rfkill` temiz, çekirdek günlüğünde tek hata satırı yok. Ölçüm bilerek en dar
+patlama yarıçapında yapıldı — sıfır BT bağlantısı, iki VM de kapalı, klavye ve
+fare USB (BT değil).
+
+**`usbfs_snoop` tek başına ölçüm yolu değildi** ve bu da ölçüldü: o bir üretici
+değil **tanık**. Transferi VM'siz üretecek hiçbir şey yok — normal libusb yolu
+sysfs'ten okuyup erken dönüyor, çekirdek de kararlı durumda `GET_CONFIGURATION`
+göndermiyor. Doğru kullanımı yukarıdaki gibi, programın **üstüne** bağımsız
+ikinci tanık olarak.
 
 ## Bilinen risk — ve arıza kipinin adı var
 
@@ -300,18 +334,28 @@ issue'lara medyan ilk cevap 3 saat.
 
 **Çerçeve kaderi belirliyor.** "VM'imde passthrough bozuk" ölüyor: birebir
 benzeri bir issue 33 dakikada kapsam dışı kapandı. Yaşayan çerçeve **API
-sözleşmesi** — `libusb_wrap_sys_device()`'ın doxygen'i *"no requests are sent
-over the bus"* diyor, oysa Linux'ta wrap yolu telde `GET_CONFIGURATION`
-gönderiyor. Rapor **"radyo 0 cevaplıyor" dememeli** (bu ölçülmedi), mimari
-asimetriyi söylemeli.
+sözleşmesi** — `libusb_wrap_sys_device()`'ın doxygen'i *"This is a non-blocking
+function; no requests are sent over the bus"* diyor (birebir alıntı, `core.c`),
+oysa Linux'ta wrap yolu telde `GET_CONFIGURATION` gönderiyor. Başlık mimari
+asimetri; ölçülen bayt **destekleyici kanıt**, başlık değil.
 
-**Sıra:** önce yukarıdaki tek bayt ölçülür. `0x00` gelirse mekanizma kapanır ve
-rapor kendini yazar; `0x01` gelirse **mekanizma iddiası hiç gönderilmez.**
-QEMU'ya rapor ayrı ve isteğe bağlı, yalnızca mekanizmadan bağımsız kusurla:
-`usb_host_detach_kernel()`'in hiç başarısızlık yolu yok — descriptor çağrısı
-düşünce sessizce dönüyor ve detach etmediği arayüzleri `detached = true` diye
-kaydediyor. (libusb'nin `AGENTS.md`'si AI yardımının `Assisted-by:` trailer'ıyla
-bildirilmesini şart koşuyor.)
+**Sıra tamamlandı: bayt ölçüldü ve `0x00` çıktı** (2026-08-07) → "Ayıracak
+ölçüm". Yani mekanizma kapandı ve rapor kendini yazdı. Yayımlanmadan önce
+kaynağın dört iddiası master'a karşı birebir doğrulandı: `op_wrap_sys_device()`
+gerçekten `NULL` geçiyor, `initialize_device()` `sysfs_dir` doluysa erken
+dönüyor, `usbfs_get_active_config()` isteği aynen bu parametrelerle gönderiyor,
+ve `-1` yalnızca `op_set_configuration()` ile onarılabiliyor (yedi atamanın
+tek onaranı o) — yani durum **yapışkan**. Mükerrer de arandı: `wrap_sys_device`
+geçen tek issue #1400, 2023'te kapanmış ve başka konu.
+
+QEMU'ya rapor **ayrı ve isteğe bağlı** kalıyor, yalnızca mekanizmadan bağımsız
+kusurla: `usb_host_detach_kernel()`'in hiç başarısızlık yolu yok — descriptor
+çağrısı düşünce sessizce dönüyor ve detach etmediği arayüzleri `detached = true`
+diye kaydediyor.
+
+libusb'nin `AGENTS.md`'si `Assisted-by:` trailer'ını **commit ve PR açıklaması**
+için şart koşuyor; issue için bir şart yazmıyor, ama aynı ruhla rapora da
+konuyor (`claude-code:claude-opus-5` — en özgül model adı isteniyor).
 
 ## vfioctl bunu neden yazmıyor
 
