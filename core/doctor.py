@@ -35,8 +35,9 @@ import os
 import sys
 from dataclasses import dataclass
 
-from . import hostfiles, lookingglass, probe, session
+from . import hostfiles, lookingglass, probe, provenance, session
 from .profile import Profile
+from .term import paint
 
 HARD, SOFT = "sert", "yumuşak"
 
@@ -249,13 +250,37 @@ def _check_lg_release() -> Check:
     )
 
 
+def _check_provenance() -> Check:
+    """Is the code running here the code this machine has installed? (K20)
+
+    SOFT, AND NEVER BEHIND THE GATE, for the same reason as the Looking Glass
+    line above: a version difference does not make the handover wrong. What it
+    makes wrong is every other line on this page, since they describe what the
+    RUNNING copy would do, and the reader is looking at them to decide what the
+    machine will do next.
+
+    IT IS HERE BECAUSE `install --check` STRUCTURALLY CANNOT ASK IT. That check
+    compares /etc against what the running code generates, so a stale copy
+    calls the machine "identical" precisely when it is behind. The two
+    questions read the same way and are opposites: one asks whether /etc
+    matches this code, this one asks whether this code is the code that was
+    installed.
+    """
+    r = provenance.describe()
+    return Check(
+        "surum", SOFT, r.same, "koşan kod ile kurulu paket aynı sürümde",
+        r.detail, remedy=r.remedy,
+    )
+
+
 def run_checks(machine: probe.Machine, p: Profile | None) -> list[Check]:
     checks = (_checks_with_profile(machine, p) if p
               else _checks_without_profile(machine))
-    # Appended rather than folded into either list: it is a question about two
-    # pieces of software agreeing, not about what this machine is, and gate()
-    # deliberately never sees it.
-    return checks + [_check_lg_release()]
+    # Appended rather than folded into either list: neither is a question about
+    # what this machine is -- one is two pieces of software agreeing, the other
+    # is which copy of this tool is talking -- and gate() deliberately never
+    # sees either.
+    return checks + [_check_lg_release(), _check_provenance()]
 
 
 # --------------------------------------------------------------------------- #
@@ -350,7 +375,8 @@ def session_checks(dgpu: str | None, igpu: str | None) -> list[Check]:
     if not link.is_symlink():
         checks.append(Check(
             "igpu-symlink", SOFT, False, f"{link} iGPU'yu gösteriyor",
-            "yok — `vfioctl install` yazar; seans yarısı bu ada bağlanır",
+            f"yok — `{provenance.command('install')}` yazar; seans yarısı bu "
+            "ada bağlanır",
         ))
     else:
         target = os.path.basename(os.path.realpath(link))
@@ -396,10 +422,6 @@ def gate(profile_name: str | None = None) -> tuple[bool, Profile | None, list[Ch
 # output
 # --------------------------------------------------------------------------- #
 
-def _paint(text: str, code: str) -> str:
-    return f"\033[{code}m{text}\033[0m" if sys.stdout.isatty() else text
-
-
 def _line(c: Check) -> str:
     if c.ok is None:
         mark, colour = "?", "36"
@@ -409,7 +431,7 @@ def _line(c: Check) -> str:
         mark, colour = "!", "33"
     else:
         mark, colour = "✗", "31"
-    head = f"  {_paint(mark, colour)} {c.title}"
+    head = f"  {paint(mark, colour)} {c.title}"
     return f"{head}\n      {c.detail}" if c.detail else head
 
 
@@ -432,7 +454,7 @@ def report(profile_name: str | None = None) -> int:
     if p:
         print(f"Profil   : {p.name} — {p.title}")
     else:
-        print(f"Profil   : {_paint('bu makineyi üstlenen profil yok', '33')}")
+        print(f"Profil   : {paint('bu makineyi üstlenen profil yok', '33')}")
     print()
 
     checks = run_checks(machine, p)
@@ -445,7 +467,7 @@ def report(profile_name: str | None = None) -> int:
     # does not pass is the point of it.
     dgpu, igpu = _cards(machine, p)
     print()
-    print(_paint(SESSION_TITLE, "1"))
+    print(paint(SESSION_TITLE, "1"))
     session_results = session_checks(
         dgpu.address if dgpu else None, igpu.address if igpu else None)
     for c in session_results:
@@ -461,7 +483,7 @@ def report(profile_name: str | None = None) -> int:
     print()
 
     if p is None:
-        print(_paint("Yazan alt komutlar koşmaz: profil eşleşmesi yok.", "33"))
+        print(paint("Yazan alt komutlar koşmaz: profil eşleşmesi yok.", "33"))
         print("Yukarıdaki sert ölçütler geçiyorsa bu makine için profil "
               "yazmak anlamlı — profiles/ altına bir .toml.")
         if blocking:
@@ -474,7 +496,7 @@ def report(profile_name: str | None = None) -> int:
         return 1
 
     if blocking:
-        print(_paint(f"KAPI KAPALI — {len(blocking)} sert ölçüt geçmedi.", "1;31"))
+        print(paint(f"KAPI KAPALI — {len(blocking)} sert ölçüt geçmedi.", "1;31"))
         for c in blocking:
             print(f"  - {c.title}: {c.detail}")
             if c.remedy:
@@ -484,7 +506,7 @@ def report(profile_name: str | None = None) -> int:
               "çalışan bir passthrough kurulumu, hiç kurulmamış olmaktan kötü.")
         return 1
 
-    print(_paint("KAPI AÇIK — sert ölçütlerin hepsi geçti.", "1;32"))
+    print(paint("KAPI AÇIK — sert ölçütlerin hepsi geçti.", "1;32"))
     if warnings:
         print(f"{len(warnings)} yumuşak uyarı var; engel değil:")
         for c in warnings:

@@ -45,9 +45,10 @@ import subprocess
 from difflib import unified_diff
 from pathlib import Path
 
-from . import doctor, hostfiles, probe, sysfile
+from . import doctor, hostfiles, probe, provenance, sysfile
 from .hostfiles import Layout, Managed
 from .profile import Profile
+from .term import paint
 
 # _IO('u', 0x44) from the kvmfr module's own header; it answers with the byte
 # size the device was created with. A wrong number here would not raise -- it
@@ -59,19 +60,19 @@ PCI_DEVICES = Path("/sys/bus/pci/devices")
 
 
 def _say(text: str) -> None:
-    print(f"\n\033[1m{text}\033[0m")
+    print(f"\n{paint(text, '1')}")
 
 
 def _ok(text: str) -> None:
-    print(f"  \033[32m✓\033[0m {text}")
+    print(f"  {paint('✓', '32')} {text}")
 
 
 def _warn(text: str) -> None:
-    print(f"  \033[33m!\033[0m {text}")
+    print(f"  {paint('!', '33')} {text}")
 
 
 def _bad(text: str) -> None:
-    print(f"  \033[31m✗\033[0m {text}")
+    print(f"  {paint('✗', '31')} {text}")
 
 
 # --------------------------------------------------------------------------- #
@@ -284,7 +285,8 @@ def _allow_kvmfr_in_libvirt() -> tuple[int, bool]:
 def install(profile_name: str | None = None, kvmfr_mb: int | None = None) -> int:
     open_gate, p, checks = doctor.gate(profile_name)
     if not open_gate or p is None:
-        print("Kapı kapalı — kurulum koşmaz. Ayrıntı için: vfioctl doctor")
+        print("Kapı kapalı — kurulum koşmaz. Ayrıntı için: "
+              f"{provenance.command('doctor')}")
         for c in checks:
             if c.blocking:
                 print(f"  - {c.title}: {c.detail}")
@@ -293,7 +295,8 @@ def install(profile_name: str | None = None, kvmfr_mb: int | None = None) -> int
     machine = probe.read_machine()
     layout = resolve(machine, p)
     if layout is None:
-        print("HATA: profil geçti ama adresler çözülemedi. vfioctl doctor")
+        print("HATA: profil geçti ama adresler çözülemedi. "
+              f"{provenance.command('doctor')}")
         return 1
 
     problems = preconditions()
@@ -408,7 +411,8 @@ def verify(layout: Layout, wanted_mb: int | None = None) -> int:
         text = f"{c.title}: {c.detail}" if c.detail else c.title
         (_ok if c.ok is True else _warn)(text)
     if any(c.ok is not True for c in session_results):
-        print("      Ölçüt ve nereye kurulacağı: `vfioctl doctor`")
+        print("      Ölçüt ve nereye kurulacağı: "
+              f"`{provenance.command('doctor')}`")
 
     if kvmfr_is_device():
         loaded = kvmfr_loaded_mb()
@@ -469,7 +473,8 @@ def check(profile_name: str | None = None, kvmfr_mb: int | None = None) -> int:
     machine = probe.read_machine()
     layout = resolve(machine, p)
     if layout is None:
-        print("Adresler çözülemedi. vfioctl doctor")
+        print("Adresler çözülemedi. "
+              f"{provenance.command('doctor')}")
         return 1
 
     size, basis = hostfiles.kvmfr_size(kvmfr_mb)
@@ -510,13 +515,15 @@ def check(profile_name: str | None = None, kvmfr_mb: int | None = None) -> int:
         drift += 1
 
     if not open_gate:
-        _warn("kapı kapalı: bu makinede `install` koşmaz (vfioctl doctor)")
+        _warn("kapı kapalı: bu makinede `install` koşmaz "
+              f"({provenance.command('doctor')})")
 
     print()
     if drift == 0:
-        print("\033[1;32mMakine kurulu hâliyle birebir aynı.\033[0m")
+        print(paint("Makine kurulu hâliyle birebir aynı.", "1;32"))
         return 0
-    print(f"\033[33m{drift} fark var.\033[0m `vfioctl install` bunları yazar.")
+    print(f"{paint(f'{drift} fark var.', '33')} "
+          f"`{provenance.command('install')}` bunları yazar.")
     return 1
 
 
@@ -549,7 +556,8 @@ def uninstall(profile_name: str | None = None, kvmfr_mb: int | None = None) -> i
     machine = probe.read_machine()
     layout = resolve(machine, p)
     if layout is None:
-        print("Adresler çözülemedi. vfioctl doctor")
+        print("Adresler çözülemedi. "
+              f"{provenance.command('doctor')}")
         return 1
 
     on_vfio = [a for a in layout.group_members if probe.driver_of(a) == "vfio-pci"]

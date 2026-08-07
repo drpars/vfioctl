@@ -42,7 +42,7 @@ import sys
 from pathlib import Path
 
 from core import (doctor, install as install_mod, inventory,
-                  profile as profile_mod, selftest)
+                  profile as profile_mod, provenance, selftest)
 
 HERE = Path(__file__).resolve().parent
 
@@ -128,7 +128,8 @@ def cmd_guest(head: list[str], rest: list[str]) -> int:
     if head:
         print(f"vfioctl: {' '.join(head)} misafir tarafından önce verilemez -- "
               "bu seçenekler alt komuttan sonra gelir, örn. "
-              "`vfioctl guest passthrough --profile <ad>`", file=sys.stderr)
+              f"`{provenance.command('guest', 'passthrough', '--profile', '<ad>')}`",
+              file=sys.stderr)
         return 2
     path = HERE / "guest" / "build.py"
     spec = importlib.util.spec_from_file_location("vfioctl_guest_build", path)
@@ -146,7 +147,12 @@ def main() -> int:
         prog="vfioctl",
         description="VFIO GPU passthrough kurulumunu kur, ölç ve sür",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=__doc__,
+        # The header above is written for a reader in a clone, where ./vfioctl
+        # is the invocation. It is also the help text, where a command that
+        # does not run is worse than useless -- so the name is resolved on the
+        # way out (K20), and only here, at the one point the docstring becomes
+        # output.
+        epilog=provenance.rewrite(__doc__ or ""),
     )
     parser.add_argument("--profile", default=None,
                         help="DMI ile seçmek yerine adı verilen profili kullan")

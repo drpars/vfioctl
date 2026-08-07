@@ -49,7 +49,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from . import hostfiles, install as install_mod, probe, session
+from . import hostfiles, install as install_mod, probe, provenance, session
 
 LOG = Path("/tmp/vfioctl-selftest.log")
 HOOK_LOG = Path("/var/log/vfio-hook.log")
@@ -76,6 +76,16 @@ class Tee:
         if self.file:
             self.file.flush()
         self.stream.flush()
+
+    def isatty(self) -> bool:
+        """False even when the terminal half is one, so nothing paints.
+
+        Half of this stream is the log file, and that file is the artifact the
+        whole command exists to leave behind: the copy that survives the
+        graphics session dying mid-round and gets read from somewhere else.
+        Escape codes written for the terminal land in it as well.
+        """
+        return False
 
 
 def _now() -> str:
@@ -476,14 +486,14 @@ def run(rounds: int = 5, domain: str = "win11", compositor: str = "Hyprland",
 
     open_gate, p, _ = doctor.gate(profile_name)
     if not open_gate or p is None:
-        print("Kapı kapalı — selftest koşmaz. vfioctl doctor")
+        print(f"Kapı kapalı — selftest koşmaz. {provenance.command('doctor')}")
         return 1
     layout = install_mod.resolve(probe.read_machine(), p)
     if layout is None:
-        print("Adresler çözülemedi. vfioctl doctor")
+        print(f"Adresler çözülemedi. {provenance.command('doctor')}")
         return 1
     if not hostfiles.HOOK.exists():
-        print(f"{hostfiles.HOOK} yok — önce `vfioctl install`.")
+        print(f"{hostfiles.HOOK} yok — önce `{provenance.command('install')}`.")
         return 1
 
     if preflight_only:
@@ -495,8 +505,33 @@ def run(rounds: int = 5, domain: str = "win11", compositor: str = "Hyprland",
 
     # The guard, not a nag: inside the session this test cannot report its own
     # failure, because the failure it hunts kills the session.
-    if not assume_yes and sys.stdin.isatty():
-        tty = os.ttyname(sys.stdin.fileno()) if sys.stdin.isatty() else ""
+    #
+    # A MISSING TTY IS A REFUSAL, NOT A YES. This used to skip the whole block
+    # when stdin was not a terminal, which reads as caution and is the
+    # opposite: `vfioctl selftest < /dev/null`, or the same line run by any
+    # tool that does not allocate a pty, went straight into five handover
+    # rounds with nobody asked. Consent is given by --yes and cannot be
+    # inferred from the absence of somebody to ask.
+    if not assume_yes:
+        # The suggested line is this invocation plus --yes, not a rebuilt one:
+        # a hint spelled `selftest --yes` from a run that said `--domain
+        # win11-test --rounds 1` would point five rounds at the DEFAULT domain,
+        # which is the working guest. --yes is valid last, after the
+        # subcommand's own flags, so appending is enough.
+        deliberate = provenance.command(*sys.argv[1:], "--yes")
+        if not sys.stdin.isatty():
+            print("Bu çağrının tty'si yok, yani düz VT sorusu sorulamıyor — ve "
+                  "cevabı varsayılmıyor.")
+            print(f"{rounds} devir turu kartı taşır. Bilerek isteniyorsa: "
+                  f"{deliberate}")
+            return 2
+        try:
+            tty = os.ttyname(sys.stdin.fileno())
+        except OSError as exc:
+            print(f"Bu kabuğun tty adı okunamadı ({exc.strerror}), yani düz VT "
+                  "olup olmadığı ölçülemiyor — ve varsayılmıyor.")
+            print(f"Bilerek isteniyorsa: {deliberate}")
+            return 2
         if tty.startswith("/dev/pts/") and not os.environ.get("SSH_CONNECTION"):
             print("Bu kabuk grafik oturumunun içindeki bir terminale benziyor, "
                   "düz bir VT değil.")

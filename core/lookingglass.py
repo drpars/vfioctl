@@ -48,6 +48,8 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import provenance
+
 CLIENT_BIN = "looking-glass-client"
 
 # The guest side's download address is derived, never typed twice: the release
@@ -221,6 +223,6 @@ def remedy(client: str | None, guest: str | None) -> str:
         f"Misafir tarafı istemcinin sürümüne çekilir: {artifact_url(client)}\n"
         f"  {PS1.name} içinde $Version, $Url ve $Sha256 ÜÇÜ BİRLİKTE "
         f"güncellenir (sha256 yalnızca tek bir sürüm için geçerli), sonra\n"
-        f"  ./vfioctl guest --name <domain> setup"
+        f"  {provenance.command('guest', '--name', '<domain>', 'setup')}"
         + (f"\n  Misafirde şu an {guest} var." if guest else "")
     )

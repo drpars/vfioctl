@@ -158,6 +158,15 @@ class Tee:
             self.file.flush()
         self.stream.flush()
 
+    def isatty(self) -> bool:
+        """False even when the terminal half is one, so nothing paints.
+
+        Half of this stream is SETUP_LOG, and that file is what a round is read
+        from after the fact. Escape codes written for the terminal land in it
+        as well. core/term.py owns the rest of that rule.
+        """
+        return False
+
 
 def say(msg):
     print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
@@ -175,8 +184,17 @@ def self_cmd(*words: str) -> str:
     K15, so a hint that prints only the flags prints a command that does not
     run. Six of them did, left over from the rename; going through one place
     means the next one cannot.
+
+    The spelling itself is core/provenance.py's answer, not raw argv[0]: from a
+    PATH invocation argv[0] is an absolute path, which runs but reads as noise
+    (K20). Imported here rather than at module scope because core/ is a sibling
+    directory this file reaches through sys.path, the same way every other
+    function below does.
     """
-    return " ".join((sys.argv[0], *words))
+    if str(HERE.parent) not in sys.path:
+        sys.path.insert(0, str(HERE.parent))
+    from core.provenance import command
+    return command(*words)
 
 
 # --------------------------------------------------------------------------- #
@@ -479,13 +497,13 @@ def dgpu_addresses(profile_name: str | None) -> list[str]:
     open_gate, p, _ = doctor.gate(profile_name)
     if not open_gate or p is None:
         die("Kapı kapalı -- bu makinede karta dokunan bir domain tanımlanmaz. "
-            "Teşhis: ./vfioctl doctor")
+            f"Teşhis: {self_cmd('doctor')}")
     layout = install_mod.resolve(probe.read_machine(), p)
     if layout is None:
-        die("Kartın adresleri çözülemedi. Teşhis: ./vfioctl doctor")
+        die(f"Kartın adresleri çözülemedi. Teşhis: {self_cmd('doctor')}")
     if not hostfiles.HOOK.exists():
         say(f"UYARI: {hostfiles.HOOK} yok -- kartı devredecek hook kurulu değil, "
-            "domain başlatılamaz. Önce: ./vfioctl install")
+            f"domain başlatılamaz. Önce: {self_cmd('install')}")
     return [layout.dgpu] + ([layout.dgpu_audio] if layout.dgpu_audio else [])
 
 
@@ -1576,7 +1594,8 @@ def vdd_mode() -> tuple[int, int] | None:
             f"{hostfiles.required_mb(*smallest)} MB pencere istiyor, kurulu "
             f"pencere {window_mb} MB")
         say("  VDD çözünürlüğü betiğin varsayılanında kalıyor -- pencereyi "
-            "büyütmek: vfioctl install, sonra reboot (kvmfr boot'ta yükleniyor)")
+            f"büyütmek: {self_cmd('install')}, sonra reboot (kvmfr boot'ta "
+            "yükleniyor)")
         return None
 
     chosen = max(fits, key=lambda mode: mode[0] * mode[1])
@@ -1636,13 +1655,34 @@ def confirm_plain_vt(a, name: str, claims: set[str]) -> bool:
     it -- taking the output of the round that would have explained why. It only
     asks when the domain actually claims a PCI function, because the cardless
     rehearsal is meant to be run from the desktop as often as debugging needs.
+
+    A MISSING TTY IS A REFUSAL, NOT A YES. Both the "no terminal" and the
+    "cannot read the terminal's name" paths used to return True, so a caller
+    with no pty -- a script, a job runner, an agent -- got the card handed over
+    with nobody asked, and the line that looked like a guard was the line that
+    waved it through. --yes is how consent is given; the absence of somebody to
+    ask is not consent.
     """
-    if getattr(a, "yes", False) or not sys.stdin.isatty():
+    if getattr(a, "yes", False):
         return True
+
+    # This invocation plus --yes, not a rebuilt one: a hint that named the
+    # subcommand from constants would drop --gpu-name, --timeout and every
+    # other flag the caller actually typed, and re-running it would do a
+    # different thing than the one just refused.
+    deliberate = self_cmd(*sys.argv[1:], "--yes")
+    if not sys.stdin.isatty():
+        say(f"'{name}' kartı istiyor ({' '.join(sorted(claims))}) ama bu "
+            "çağrının tty'si yok, yani düz VT sorusu sorulamıyor.")
+        say(f"Bilerek isteniyorsa: {deliberate}")
+        return False
     try:
         tty = os.ttyname(sys.stdin.fileno())
-    except OSError:
-        return True
+    except OSError as exc:
+        say(f"Bu kabuğun tty adı okunamadı ({exc.strerror}), düz VT olup "
+            "olmadığı ölçülemiyor.")
+        say(f"Bilerek isteniyorsa: {deliberate}")
+        return False
     if not tty.startswith("/dev/pts/") or os.environ.get("SSH_CONNECTION"):
         return True
     print(f"'{name}' kartı istiyor ({' '.join(sorted(claims))}) ve bu kabuk "
@@ -2167,11 +2207,20 @@ def main(argv: list[str] | None = None) -> int:
     built, which is why prog= has to be spelled out -- argparse would otherwise
     name the program after this file and print help nobody can copy.
     """
+    if str(HERE.parent) not in sys.path:
+        sys.path.insert(0, str(HERE.parent))
+    from core import provenance
+
     p = argparse.ArgumentParser(
         prog="vfioctl guest",
         description="Windows misafirini gözetimsiz kur (autounattend.xml turu)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=__doc__,
+        # The header above is written for a reader in a clone, where ./vfioctl
+        # is the invocation. It is also this subcommand's help text, and a
+        # printed command that does not resolve closes the diagnosis path it
+        # was there to open (K20) -- so the name is resolved on the way out,
+        # here, where the docstring becomes output and nowhere else.
+        epilog=provenance.rewrite(__doc__ or ""),
     )
     p.add_argument("--name", default="win11-test",
                    help="domain adı (varsayılan: win11-test)")

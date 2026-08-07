@@ -41,12 +41,12 @@ Everything else is said loudly and allowed.
 from __future__ import annotations
 
 import os
-import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import doctor, probe
 from .profile import Profile
+from .term import paint
 
 BLOCK = Path("/sys/class/block")
 MOUNTINFO = Path("/proc/self/mountinfo")
@@ -494,14 +494,10 @@ def usb_items(devices: list[probe.UsbDevice],
 MARKS = {CANDIDATE: ("✓", "32"), WARN: ("!", "33"), REFUSE: ("✗", "31")}
 
 
-def _paint(text: str, code: str) -> str:
-    return f"\033[{code}m{text}\033[0m" if sys.stdout.isatty() else text
-
-
 def _print_item(item: Item) -> None:
     mark, colour = MARKS[item.verdict]
     group = f"grup {item.group:<3}" if item.group else " " * 8
-    head = (f"  {_paint(mark, colour)} {item.ident:<13} {item.ids:<10} "
+    head = (f"  {paint(mark, colour)} {item.ident:<13} {item.ids:<10} "
             f"{group} {item.driver}")
     print(head)
     detail = f"      {item.title}"
@@ -521,9 +517,9 @@ def report(profile_name: str | None = None) -> int:
          else profile_mod.select(machine.dmi_vendor, machine.dmi_product))
 
     print(f"Makine   : {machine.dmi_vendor or '?'} {machine.dmi_product or '?'}")
-    print(f"Profil   : {p.name if p else _paint('yok — yalnızca donanım okundu', '33')}")
+    print(f"Profil   : {p.name if p else paint('yok — yalnızca donanım okundu', '33')}")
     print()
-    print(_paint("Envanter yalnızca rapordur: v1 GPU'dan başka hiçbir cihazı "
+    print(paint("Envanter yalnızca rapordur: v1 GPU'dan başka hiçbir cihazı "
                  "devretmez (K14).", "2"))
     print()
 
@@ -532,13 +528,13 @@ def report(profile_name: str | None = None) -> int:
     pci, bridges = pci_items(machine, p, claims, usb_devices)
     usb = usb_items(usb_devices)
 
-    print(_paint("PCI — devir birimi IOMMU grubudur, cihaz değil", "1"))
+    print(paint("PCI — devir birimi IOMMU grubudur, cihaz değil", "1"))
     for item in pci:
         _print_item(item)
     print(f"      ({bridges} köprü/PCIe portu listelenmedi — topolojinin kendisi)")
 
     print()
-    print(_paint("USB — devir birimi cihazın kendisidir (vendor:product)", "1"))
+    print(paint("USB — devir birimi cihazın kendisidir (vendor:product)", "1"))
     if usb:
         for item in usb:
             _print_item(item)

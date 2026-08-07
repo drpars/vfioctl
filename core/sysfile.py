@@ -30,11 +30,13 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+from .term import paint
+
 
 def run(cmd: list[str]) -> int:
     """Run a command, showing it first. Printed because these are the steps a
     reader would otherwise have to take on trust."""
-    print(f"\033[1;36m$ {' '.join(cmd)}\033[0m")
+    print(paint(f"$ {' '.join(cmd)}", "1;36"))
     return subprocess.call(cmd)
 
 
@@ -51,7 +53,7 @@ def read_text(path: Path) -> str | None:
 
 
 def sudo_write(path: Path, content: str) -> int:
-    print(f"\033[1;36m$ sudo tee {path}\033[0m")
+    print(paint(f"$ sudo tee {path}", "1;36"))
     proc = subprocess.run(
         ["sudo", "tee", str(path)],
         input=content,

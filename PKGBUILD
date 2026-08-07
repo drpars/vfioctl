@@ -36,6 +36,32 @@
 # Computing it while the PKGBUILD is sourced gives the same answer and leaves
 # the file alone.
 #
+# THE pkgver FORMULA IS WRITTEN TWICE AND MUST STAY ONE FACT. core/provenance.py
+# re-derives r<count>.g<short sha> from git so that `vfioctl doctor` can say
+# whether the running clone and the installed package are the same code (K20).
+# An installed package carries no .git, so there is no shared place to read it
+# from; if the two lines below change, that module changes with them.
+#
+# WHY THE FILE LIST COMES FROM GIT AND NOT FROM A LIST KEPT BY HAND. It used to
+# read `cp -r core data guest profiles vfioctl`, which was true the day it was
+# written and silently untrue afterwards: a new top-level directory would not be
+# packaged at all, and the package would install, run, and fail somewhere far
+# away from here. Deriving the list from git reverses the failure mode -- what
+# goes wrong now is that something not meant to ship lands in /usr/lib and does
+# nothing. The exclusion list below is still kept by hand, and that is fine for
+# the same reason: forgetting to exclude a file costs a harmless copy, while
+# forgetting to include one costs a broken install. Two things fall out for
+# free: git carries the executable bit, so a new executable is no longer
+# installed 644 by a chmod line that names two paths, and byte-code caches
+# cannot ship because git never tracked them.
+#
+# GIT PICKS THE NAMES, THE WORKING TREE SUPPLIES THE BYTES. `git archive HEAD`
+# would make the package exactly equal its own pkgver, and it was not used: a
+# developer building an uncommitted change would then install something other
+# than what they are looking at, which is a worse surprise than a version
+# string that is one commit approximate. The gap is not left silent -- package()
+# warns when the tree is dirty and `vfioctl doctor` says so afterwards.
+#
 # WHY depends= IS SHORT. The tool's standing rule is that it never installs a
 # package: a missing half is measured and the command is printed (see CLAUDE.md,
 # "Paket kurulmaz"). Only what every subcommand needs is a hard dependency;
@@ -70,17 +96,55 @@ source=()
 package() {
 	cd "$startdir"
 
+	git rev-parse --git-dir >/dev/null 2>&1 || {
+		error "dosya listesi git'ten türetiliyor; burası bir checkout değil"
+		return 1
+	}
+
+	# WHAT A DIRTY TREE ACTUALLY DOES, SAID THE RIGHT WAY ROUND. Only a file
+	# that was never `git add`ed is missing from the index and therefore never
+	# reaches the loop below. Every other kind of dirt SHIPS, carrying its
+	# working-tree bytes -- names come from the index, bytes come from the disk
+	# (see the header). So the line below warns about what the package is about
+	# to contain, not about what it will leave out: pkgver names HEAD either
+	# way, and that gap is the thing worth saying while it can still be fixed.
+	local dirt
+	dirt=$(git status --porcelain | grep -c .) || true
+	(( dirt == 0 )) || warning "$dirt yol commit edilmemiş; izlenenler bu hâlleriyle pakete giriyor, pkgver=$pkgver onları adlandırmıyor"
+
 	local libdir="$pkgdir/usr/lib/$pkgname"
-	install -dm755 "$libdir"
-	cp -r core data guest profiles vfioctl "$libdir/"
+	local entry mode path perm
 
-	# Byte-code caches from running out of the checkout must not ship: they
-	# carry the developer's paths and pacman would own files Python rewrites.
-	find "$libdir" -type d -name __pycache__ -prune -exec rm -rf {} +
+	# -z, so a path with a space or a newline in it stays one record instead
+	# of becoming two half-installed files.
+	while IFS= read -r -d '' entry; do
+		mode=${entry%% *}
+		path=${entry#*$'\t'}
 
+		# Documentation and packaging: installed elsewhere below, or not at
+		# all. Anything not named here ships, which is the safe direction.
+		case "$path" in
+		.git*|CLAUDE.md|LICENSE|PKGBUILD|README.md|docs/*) continue ;;
+		esac
+
+		case "$mode" in
+		100644) perm=644 ;;
+		100755) perm=755 ;;
+		*)
+			# A symlink (120000) or a submodule (160000). `install` would
+			# copy the target's bytes and call it the same thing, which is
+			# the silent difference this whole list exists to remove.
+			error "$path: git modu $mode -- bu paket onu nasıl kuracağını bilmiyor"
+			return 1
+			;;
+		esac
+
+		install -Dm"$perm" "$path" "$libdir/$path"
+	done < <(git ls-files -sz)
+
+	# install -D creates the leading directories; their mode is set here
+	# rather than assumed, because it is the one thing -D does not spell out.
 	find "$libdir" -type d -exec chmod 755 {} +
-	find "$libdir" -type f -exec chmod 644 {} +
-	chmod 755 "$libdir/vfioctl" "$libdir/data/50-vfio-handover"
 
 	install -dm755 "$pkgdir/usr/bin"
 	ln -s "/usr/lib/$pkgname/vfioctl" "$pkgdir/usr/bin/$pkgname"
