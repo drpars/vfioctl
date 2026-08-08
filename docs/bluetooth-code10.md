@@ -317,10 +317,28 @@ fonksiyona hiç uğramıyor. Yani **koşan misafire canlı takma özelliği kayb
 Yetenek silme ise `priv->qemuCaps`'e bir kez işlendiği için domain ömrü boyunca
 yaşıyor — canlı takmanın çalışmasının sebebi tam olarak bu.
 
-### Yukarı akışa bildirmek — BİLDİRİLDİ: libusb issue #1925
+### Yukarı akışa bildirmek — BİLDİRİLDİ ve ONAYLANDI: libusb issue #1925
 
-> **<https://github.com/libusb/libusb/issues/1925>** (2026-08-07). Cevap
-> bekleniyor; bakımcı iki yoldan hangisini seçerse yama teklif edildi.
+> **<https://github.com/libusb/libusb/issues/1925>** (2026-08-07). Bir libusb
+> **MEMBER**'ı bulguyu doğruladı: *"The core finding seems correct to me, and a
+> real issue."* Önerilen iki yoldan **birincisi (yalnız belgeyi düzeltmek)
+> reddedildi**, ikincisi (`active_config == 0` dalını komşu hata yolu gibi
+> `config_descriptors[0]`'a düşürmek) belge notuyla **eşlenerek** istendi.
+>
+> **Ama ikinci yol master'a karşı ölçüldü ve güvenli çıkmadı** (2026-08-08):
+> yamadan sonra `-1` kolu yalnızca `bNumConfigurations == 0` iken erişilebilir
+> kalıyor, yani gerçekten yapılandırılmamış (address state) bir cihaz
+> "yapılandırılmış" diye raporlanıyor — `core.c:1717` ve `descriptor.c:577`'deki
+> iki belgeli söz kırılıyor, ve libusb'nin kendi önerdiği kurtarma kalıbı
+> (`core.c:279`) sessizce atlanıyor. Ayrım kaza değil: `dev_has_config0()`
+> tam bu iş için konmuş (`f38f09d`, 2021, issue #850), ve benzer bir gevşetme
+> **PR #851**'de zaten reddedilmiş. Ayrıca `usbfs_get_active_config()`'ın iki
+> çağıranı `sysfs_dir == NULL`'a bağlı, "wrap"a değil — kapsam wrap yolundan
+> geniş. **Yama gönderilmedi; itiraz ve bir üçüncü yol önerisi hazırlanıyor.**
+>
+> **Belge yarısı ayrı ve sağlam:** doxygen cümlesinin iki yarısı da yanlış —
+> transfer bir yana, `.timeout = 1000` yüzünden fonksiyon "non-blocking" de
+> değil.
 
 Doğru uzun vadeli yol buydu, ama sırası vardı ve **adresi ilk sanılan yer
 değildi.**
