@@ -55,6 +55,12 @@ LOG = Path("/tmp/vfioctl-selftest.log")
 HOOK_LOG = Path("/var/log/vfio-hook.log")
 PROC = Path("/proc")
 
+# TASK_COMM_LEN - 1: the kernel stores at most 15 bytes of a process name, and
+# every name-based matcher compares against that truncation, /proc/<pid>/comm
+# and `pgrep -x` alike. Measured (procps-ng 4.0.6): `pgrep -x systemd-journald`
+# warns and exits 1, `pgrep -x systemd-journal` finds it.
+COMM_MAX = 15
+
 
 class Tee:
     """stdout that also lands in a file, so a dying session cannot eat the run."""
@@ -112,8 +118,32 @@ def _virsh(args: list[str], timeout: int = 60) -> tuple[int, str]:
 # --------------------------------------------------------------------------- #
 
 def pid_of(name: str) -> str | None:
-    rc, out = _sh(["pgrep", "-x", name], timeout=10)
-    return out.splitlines()[0].strip() if rc == 0 and out.strip() else None
+    """Lowest pid whose name matches, compared the way the kernel stores it.
+
+    Read from /proc instead of shelling out to `pgrep -x`, because the name has
+    to be compared against its own truncation and pgrep cannot be asked to do
+    that. The kernel keeps at most COMM_MAX bytes of a process name, so a
+    longer name matched NOTHING: pgrep printed a warning and exited 1, and this
+    function handed that back as a plain None.
+
+    That None is the expensive kind of wrong. one_round() decides the
+    compositor survived by comparing comp_before with comp_now, so two Nones
+    compare equal and the check disappears instead of firing -- a wrong "alive"
+    verdict, which is worse than no verdict. It does not fire on this machine
+    (Hyprland is 8 characters); it would fire silently on a longer name.
+
+    Matching ourselves is not a risk the way `pgrep -f <name>` would be: comm
+    holds this process's own name, never the pattern it is looking for.
+    """
+    wanted = name[:COMM_MAX]
+    for pid in sorted(int(entry.name) for entry in PROC.glob("[0-9]*")):
+        try:
+            comm = (PROC / str(pid) / "comm").read_text(encoding="utf-8").strip()
+        except OSError:
+            continue  # exited between the glob and the read
+        if comm == wanted:
+            return str(pid)
+    return None
 
 
 def cpu_jiffies(pid: str | None) -> int:
@@ -555,6 +585,18 @@ def run(rounds: int = 5, domain: str = "win11", compositor: str = "Hyprland",
     target = Target(domain, layout.dgpu, layout.dgpu_audio, compositor, poller,
                         boot_timeout, shutdown_timeout)
     comp_before = pid_of(compositor)
+    if comp_before is None:
+        # Not a refusal: a machine with no compositor can still prove the
+        # handover, and that is a smaller claim, not a false one. But every
+        # round decides "the desktop survived" by comparing this value with
+        # itself, so an absent one makes that check empty -- and an empty check
+        # reads exactly like a passing one. Say it once, in the log.
+        print(f"\n!! '{compositor}' koşmuyor (ya da adı yanlış). Compositor'ün "
+              "sağ kaldığı denetimi bu koşuda BOŞ: hüküm vermez ama geçmiş "
+              "gibi görünür.")
+        print(f"   Doğru adı bulmak: ps -eo comm= | sort -u | grep -i <parça> "
+              f"— çekirdek adın ilk {COMM_MAX} baytını saklar, daha uzunu "
+              "eşleşmez.")
     poller_j0 = cpu_jiffies(poller_pid)
 
     # Printed before anything can go wrong, not only in the summary: if the
