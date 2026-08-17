@@ -105,6 +105,8 @@ def resolve(machine: probe.Machine, p: Profile) -> Layout | None:
         group=dgpu.iommu_group,
         group_members=members,
         profile=p.name,
+        dgpu_ids=dgpu.ids,
+        igpu_ids=igpu.ids,
     )
 
 

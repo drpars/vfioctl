@@ -29,7 +29,20 @@ a card falls over:
   https://wiki.hypr.land/Configuring/Advanced-and-Cool/Multi-GPU/
 
 What is left is a name of our own: a udev SYMLINK carrying neither a colon nor
-a card number. The PCI address is read off this machine rather than baked in.
+a card number.
+
+AND THE RULE THAT CREATES IT KEYS ON THE PCI ID, NOT THE ADDRESS. Reading the
+address off this machine instead of baking one in is not enough, because the
+address is not a property of the card at all -- it is a property of the bus
+layout, and it moves when the layout does. Measured 2026-08-17: an added NVMe
+pushed the iGPU from 0000:05:00.0 to 0000:06:00.0. The rule stopped matching,
+the symlink was never created, the dotfiles guard on exists("/dev/dri/amd-igpu")
+fell through, and the compositor came up on whatever it liked -- holding the
+dGPU. Nothing logged an error. The failure surfaced three weeks later as a
+handover the hook refused, with "the dGPU is still open".
+
+The ID is also the identity the profile already uses to find the card
+(`[igpu] ids`), so the rule and the search now agree on what the card is.
 
 THE NAME KEEPS A VENDOR IN IT ON PURPOSE. "amd-igpu" is not a description, it
 is a contract: the session half lives in dotfiles, whose Hyprland config
@@ -239,7 +252,17 @@ IGPU_RULE = """\
 # between boots and AQ_DRM_DEVICES splits on ":", so by-path names cannot be
 # used. The session half (AQ_DRM_DEVICES and the EGL/GLX/Vulkan pins) guards on
 # this exact name and is not written by this tool.
-KERNEL=="card*", KERNELS=="{slot}", SUBSYSTEM=="drm", SUBSYSTEMS=="pci", SYMLINK+="{symlink}"
+#
+# Matched by PCI ID, not by address. An address is not a property of the card,
+# it is a property of the bus layout, and adding a disk renumbers it. Measured
+# 2026-08-17 on this laptop: an added NVMe moved the iGPU from 0000:05:00.0 to
+# 0000:06:00.0, this rule stopped firing, the symlink was never created,
+# AQ_DRM_DEVICES pointed at a path that did not exist, and the compositor came
+# up holding the dGPU. Nothing reported an error -- passthrough simply refused
+# the next time a guest was started, three weeks later.
+KERNEL=="card*", SUBSYSTEM=="drm", SUBSYSTEMS=="pci", \\
+    ATTRS{{vendor}}=="0x{vendor}", ATTRS{{device}}=="0x{device}", \\
+    SYMLINK+="{symlink}"
 """
 
 DGPU_SEAT_RULE = """\
@@ -270,8 +293,14 @@ DGPU_SEAT_RULE = """\
 #
 # ESCAPE HATCH: if the session will not start, delete this file from a plain VT
 # (Ctrl+Alt+F3), run `udevadm control --reload` and reboot.
+# ADDRESSES ARE NOT IDENTITIES: matched by PCI ID for the same reason as
+# 70-vfio-igpu.rules -- an added disk renumbered the iGPU here on 2026-08-17
+# and silently disarmed that rule. This one would fail the same way, and its
+# failure is quieter still: the dGPU's node would simply stay in the seat
+# inventory and handovers would go back to one per boot.
 ACTION=="remove", GOTO="vfio_dgpu_end"
-SUBSYSTEM=="drm", KERNEL=="card*", KERNELS=="{slot}", \\
+SUBSYSTEM=="drm", KERNEL=="card*", SUBSYSTEMS=="pci", \\
+    ATTRS{{vendor}}=="0x{vendor}", ATTRS{{device}}=="0x{device}", \\
     TAG-="uaccess", TAG-="seat", TAG-="master-of-seat", \\
     GROUP="root", MODE="0660"
 LABEL="vfio_dgpu_end"
@@ -331,12 +360,24 @@ SUBSYSTEM=="kvmfr", OWNER="{user}", GROUP="kvm", MODE="0660"
 """
 
 
-def igpu_rule(slot: str) -> str:
-    return IGPU_RULE.format(slot=slot, symlink=SYMLINK)
+def _ids(ids: str) -> dict[str, str]:
+    """Split "1002:1681" into the two halves a udev ATTRS match needs.
+
+    The profile already names cards this way (`[igpu] ids`), so a rule keyed on
+    the ID is keyed on the same identity the tool used to find the card in the
+    first place -- unlike the address, which is only where that card happened
+    to sit on the boot the tool was run.
+    """
+    vendor, _, device = ids.partition(":")
+    return {"vendor": vendor, "device": device}
 
 
-def dgpu_seat_rule(slot: str) -> str:
-    return DGPU_SEAT_RULE.format(slot=slot)
+def igpu_rule(ids: str) -> str:
+    return IGPU_RULE.format(symlink=SYMLINK, **_ids(ids))
+
+
+def dgpu_seat_rule(ids: str) -> str:
+    return DGPU_SEAT_RULE.format(**_ids(ids))
 
 
 def vfio_conf(group: str, devices: list[str], profile: str) -> str:
@@ -550,6 +591,11 @@ class Layout:
     group: str
     group_members: list[str]
     profile: str
+    # Addresses say where the cards sat on the boot this was resolved; the IDs
+    # say which cards they are. Anything written to a file that outlives the
+    # boot keys on the IDs -- see IGPU_RULE.
+    dgpu_ids: str
+    igpu_ids: str
 
 
 def managed_files(
@@ -558,12 +604,12 @@ def managed_files(
     """Every file the tool writes, in the order it writes them."""
     return [
         Managed(
-            "igpu-symlink", UDEV_IGPU, igpu_rule(layout.igpu),
+            "igpu-symlink", UDEV_IGPU, igpu_rule(layout.igpu_ids),
             "iGPU'ya kararlı ad (/dev/dri/amd-igpu) — compositor buna sabitlenir",
             reload="udev",
         ),
         Managed(
-            "dgpu-seat", UDEV_DGPU_SEAT, dgpu_seat_rule(layout.dgpu),
+            "dgpu-seat", UDEV_DGPU_SEAT, dgpu_seat_rule(layout.dgpu_ids),
             "dGPU'nun KMS düğümünü seat envanterinden çıkarır — devri tekrarlanabilir kılan kural",
             reload="udev",
         ),
