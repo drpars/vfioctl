@@ -55,6 +55,35 @@
 # behind, it outlives this script: nvidia can never bind the card again, the
 # machine comes back without its discrete GPU, and nothing on it says why.
 #
+# THE OVERRIDE IS ALSO THE GATE THE REST OF THE DESKTOP READS, AND THAT DECIDES
+# WHEN IT MAY BE CLEARED. Anything on the host that polls the card reads
+# driver_override before it spawns (dotfiles' waybar gputemp does), so a
+# non-empty override is what keeps the card to ourselves. Clearing it the
+# moment the guest is gone opens that gate while `modprobe nvidia_drm` is still
+# inside the driver's init -- the module registers the GPU in
+# /proc/driver/nvidia/gpus early, and the poller's gate only asks for that
+# directory plus an empty override.
+#
+# Measured 2026-08-18, same reload run twice with only this variable changed:
+#
+#   override empty    modprobe nvidia_drm 3.31 s, and INSIDE that window
+#                     nvidia-smi (2.08 s in) and nvidia-modprobe (3.26 s in)
+#                     both entered the driver, both in state D
+#   override "nvidia" modprobe nvidia_drm 3.33 s, nothing else entered
+#
+# Two nvidia inits running at once is what the fifth acceptance round wedged
+# on: `modprobe nvidia_drm` stuck in kgspInitRm_IMPL -> rmapiLockAcquire on an
+# rw-semaphore the kernel named a kworker as the owner of, unkillable, recovery
+# by reboot only. That the concurrency caused THAT deadlock is not proven -- it
+# happened once and its log did not survive the reboot -- but the concurrency
+# itself is measured, and it is ours to remove.
+#
+# So the override is not cleared and then reloaded into. It is AIMED at the
+# driver the device is going home to (see aim_override_home), which keeps it
+# non-empty for the whole reload, keeps the poller's existing gate shut with no
+# change on that side, and narrows what may bind to exactly one driver. Only
+# once the card is back does it get cleared.
+#
 # NOT IN SCOPE
 # The compositor half. Hyprland must already be pinned to the integrated GPU
 # before it starts (AQ_DRM_DEVICES plus the EGL/GLX/Vulkan ICD pins; the stable
@@ -109,6 +138,13 @@ set -uo pipefail
 # unload_nvidia stops it itself a moment later, so waiting for a process only
 # this script can end would never finish.
 : "${VFIO_HOLDER_IGNORE_UID:=0}"
+
+# Which driver each device was on when the handover started, so release can aim
+# the override at it instead of clearing it. Under /run on purpose: the record
+# describes a handover that is in flight, and a boot with no handover in flight
+# must not find one. Missing or unreadable is a supported state -- release then
+# falls back to clearing, which is what this script did before.
+: "${VFIO_RETURN_STATE:=/run/vfioctl/return-driver}"
 
 # Verification mode (see below) has to be runnable by the user who defined the
 # domain, and /var/log is not theirs to write.
@@ -292,6 +328,70 @@ clear_override() {
         echo > "$SYSFS_PCI/devices/$dev/driver_override" 2>/dev/null \
             || log "WARN: could not clear driver_override for $dev"
     done
+}
+
+# Written before set_override, so it records where the devices came FROM.
+# Failure is silent and harmless: every reader of this file treats its absence
+# as "no record", which is the state this script has always handled.
+save_return_drivers() {
+    local dev
+    mkdir -p "${VFIO_RETURN_STATE%/*}" 2>/dev/null || return 0
+    : > "$VFIO_RETURN_STATE" 2>/dev/null || return 0
+    for dev in $DEVICES; do
+        printf '%s %s\n' "$dev" "$(driver_of "$dev")" >> "$VFIO_RETURN_STATE"
+    done
+}
+
+# The recorded driver for one device, or non-zero when there is nothing usable.
+# "vfio-pci" is rejected rather than returned: it means the record was written
+# by a second prepare/begin that ran while the card was already handed over, and
+# aiming a device home at vfio-pci would be the one value that cannot be right.
+return_driver() {
+    local dev drv
+    [ -r "$VFIO_RETURN_STATE" ] || return 1
+    while read -r dev drv; do
+        [ "$dev" = "$1" ] || continue
+        case $drv in
+            "" | "(none)" | vfio-pci) return 1 ;;
+            *) printf '%s' "$drv"; return 0 ;;
+        esac
+    done < "$VFIO_RETURN_STATE"
+    return 1
+}
+
+# Point the override at the driver the device is going back to. See the header:
+# this keeps the gate the desktop reads shut for the whole reload, instead of
+# opening it two seconds before the driver has finished coming up.
+#
+# A pure attribute write, exactly like set_override -- it detaches nothing and
+# probes nothing, so THE ONE RULE does not apply to it. With the override set
+# the PCI core forces a match on that driver name alone, which is how nvidia
+# still takes the card during module load. Measured 2026-08-18: with
+# driver_override=nvidia in place across an unload/reload, `modprobe nvidia_drm`
+# returned 0 and the card came back on nvidia.
+aim_override_home() {
+    local dev drv
+    for dev in $DEVICES; do
+        if drv=$(return_driver "$dev") \
+            && echo "$drv" > "$SYSFS_PCI/devices/$dev/driver_override" 2>/dev/null
+        then
+            continue
+        fi
+        # No record, or the write failed. Clearing is the older behaviour and
+        # still correct -- it only reopens the poller's gate a little early.
+        echo > "$SYSFS_PCI/devices/$dev/driver_override" 2>/dev/null \
+            || log "WARN: could not clear driver_override for $dev"
+    done
+}
+
+# The undo every giving-up path in prepare/begin runs. Aiming the override
+# before the modprobe and clearing it after is the same order release uses, and
+# for the same reason; it ends cleared because a path that gives up must leave
+# nothing behind (see the header).
+restore_nvidia() {
+    aim_override_home
+    reload_nvidia
+    clear_override
 }
 
 # modprobe -r exits non-zero for a module that is not loaded ("FATAL: Module x
@@ -479,10 +579,11 @@ bind_vfio() {
 
 release_vfio() {
     local dev
-    # Order matters and is the reverse of bind: clear the override and unbind
-    # from vfio-pci *before* the nvidia modules come back, so nothing is ever
-    # asked to detach a card nvidia has re-attached to.
-    clear_override
+    # Order matters and is the reverse of bind: take the override off vfio-pci
+    # and unbind from vfio-pci *before* the nvidia modules come back, so nothing
+    # is ever asked to detach a card nvidia has re-attached to. Aimed rather
+    # than cleared, and cleared only at the end -- see the header.
+    aim_override_home
     # libvirt also calls release/end after a prepare/begin that refused, so a
     # device here may never have left nvidia. Both writes below are therefore
     # asked "is there anything to do" first: probing a device that already has
@@ -498,6 +599,9 @@ release_vfio() {
             && timeout 20 tee "$SYSFS_PCI/drivers_probe" <<<"$dev" >/dev/null 2>&1
         log "$dev -> $(driver_of "$dev")"
     done
+    # Last, and only now: the card is back, so the gate may reopen.
+    clear_override
+    rm -f "$VFIO_RETURN_STATE" 2>/dev/null
 }
 
 xml=$(cat)
@@ -506,6 +610,9 @@ claims_dgpu "$xml" || exit 0
 case "$OP/$SUBOP" in
 prepare/begin)
     log "handover requested; dGPU currently on $(driver_of "${DEVICES%% *}")"
+    # Before the override is written, because this records where the devices
+    # came from and set_override is what overwrites that answer.
+    save_return_drivers
     # Order is the whole point here; see THE ONE RULE at the top.
     if ! set_override; then
         clear_override
@@ -515,18 +622,15 @@ prepare/begin)
     # refusing: the desktop should not lose PRIME offload -- or the card
     # altogether, via a leftover override -- because a VM failed to start.
     if ! wait_for_release; then
-        clear_override
-        reload_nvidia
+        restore_nvidia
         die "the dGPU is still open -- close whatever holds /dev/nvidia0 and retry"
     fi
     if ! unload_nvidia; then
-        clear_override
-        reload_nvidia
+        restore_nvidia
         die "cannot free the dGPU -- close whatever holds /dev/nvidia0 and retry"
     fi
     if ! bind_vfio; then
-        clear_override
-        reload_nvidia
+        restore_nvidia
         die "devices did not bind to vfio-pci"
     fi
     log "handover complete"

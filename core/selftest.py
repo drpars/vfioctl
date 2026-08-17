@@ -51,7 +51,28 @@ from pathlib import Path
 
 from . import hostfiles, install as install_mod, probe, provenance, session
 
-LOG = Path("/tmp/vfioctl-selftest.log")
+def _log_path() -> Path:
+    """Where the run's transcript goes -- deliberately not /tmp.
+
+    The docstring above says the log exists so the result survives the reader.
+    It did not survive the machine. /tmp is a tmpfs here, and the one failure
+    this command cannot reconstruct afterwards is also the one whose only
+    recovery is a reboot: measured 2026-08-18, the round that left `modprobe`
+    in D state took its own transcript with it, and what had happened had to be
+    rebuilt from the journal and the hook log.
+
+    XDG_STATE_HOME is the drawer for exactly this by its own definition --
+    state that should persist between restarts and is not precious enough for
+    XDG_DATA_HOME. The fallback is the spec's default and not /tmp: an
+    unwritable path costs the file, which Tee already survives, while a tmpfs
+    one costs the evidence.
+    """
+    base = os.environ.get("XDG_STATE_HOME", "").strip()
+    root = Path(base) if base.startswith("/") else Path.home() / ".local" / "state"
+    return root / "vfioctl" / "selftest.log"
+
+
+LOG = _log_path()
 HOOK_LOG = Path("/var/log/vfio-hook.log")
 PROC = Path("/proc")
 
@@ -61,6 +82,23 @@ PROC = Path("/proc")
 # warns and exits 1, `pgrep -x systemd-journal` finds it.
 COMM_MAX = 15
 
+# What timeout(1) reports, reused here so a command that never answered is
+# distinguishable from one that answered badly. The difference decides a
+# verdict: `virsh domstate` printing "running" is a guest that is still up,
+# `virsh domstate` never printing anything is a libvirtd blocked somewhere --
+# and in this command's worst case it is blocked in its own hook, waiting on
+# the rebind. Collapsing the two made the tool report a wedged rebind as "the
+# guest did not shut down" (measured 2026-08-18).
+TIMED_OUT = 124
+
+# Names -- kernel-truncated, see COMM_MAX -- of the processes that carry an
+# nvidia device through its init. A task of any of them in state D is what a
+# wedged rebind looks like from userspace.
+NVIDIA_INIT_COMMS = frozenset({
+    "modprobe", "insmod", "rmmod", "nvidia-smi", "nvidia-modprobe",
+    "nvidia-persiste", "nvidia-powerd",
+})
+
 
 class Tee:
     """stdout that also lands in a file, so a dying session cannot eat the run."""
@@ -68,6 +106,7 @@ class Tee:
     def __init__(self, path: Path):
         self.stream = sys.stdout
         try:
+            path.parent.mkdir(parents=True, exist_ok=True)
             self.file = path.open("a", encoding="utf-8")
         except OSError:
             self.file = None
@@ -101,6 +140,10 @@ def _now() -> str:
 def _sh(cmd: list[str], timeout: int = 60) -> tuple[int, str]:
     try:
         out = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        # Caught before SubprocessError, which it inherits from, because the
+        # two mean opposite things here -- see TIMED_OUT.
+        return TIMED_OUT, f"{cmd[0]}: {timeout}s içinde cevap vermedi"
     except (OSError, subprocess.SubprocessError) as exc:
         return 1, str(exc)
     return out.returncode, (out.stdout + out.stderr).strip()
@@ -175,6 +218,66 @@ def proc_state(pid: str | None) -> str:
         return ""
     rest = stat.rsplit(") ", 1)[-1].split()
     return rest[0] if rest else ""
+
+
+def d_state_procs() -> list[tuple[str, str]]:
+    """(comm, pid) for every task the kernel has in uninterruptible sleep.
+
+    D is the state worth naming because it is the one nothing can undo: the
+    task takes no signal, so kill -9, timeout(1) and libvirt cancelling its own
+    hook all pass over it, and the machine leaves the state only by rebooting.
+    Read straight from /proc rather than through ps: by the time this is asked
+    the host is already sick, and a fork is one more thing that can block.
+    """
+    out: list[tuple[str, str]] = []
+    try:
+        entries = list(PROC.iterdir())
+    except OSError:
+        return out
+    for entry in entries:
+        if not entry.name.isdigit():
+            continue
+        try:
+            stat = (entry / "stat").read_text(encoding="utf-8")
+        except OSError:
+            continue  # exited between the listing and the read
+        # comm is the only field that can contain spaces or parentheses, and it
+        # is wrapped in the last pair of them -- so split from the right.
+        head, _, rest = stat.rpartition(") ")
+        fields = rest.split()
+        if fields and fields[0] == "D":
+            out.append((head.partition("(")[2], entry.name))
+    return out
+
+
+def rebind_wedged(dgpu: str) -> str:
+    """Why the round failed, when what failed is the rebind and not the guest.
+
+    THE FAILURE THIS EXISTS FOR. Measured 2026-08-18, fifth round: the guest
+    shut down, vfio-pci reset the card and let go, `modprobe nvidia_drm` took
+    it back -- and never returned, stuck in the driver's GSP init
+    (nv_drm_dev_load -> nvkms_open_gpu -> nv_start_device -> RmInitAdapter ->
+    kgspInitRm_IMPL -> rmapiLockAcquire, blocked on an rw-semaphore). The hook
+    runs synchronously under libvirtd, so the daemon went down with it and
+    every virsh after that timed out.
+
+    WHY THE DOMAIN STATE CANNOT DECIDE THIS. Both failures -- a guest that
+    ignores its shutdown, and a rebind that hangs -- end as the same timeout on
+    the same `virsh domstate`. The round used to read that timeout as the first
+    one and print "the guest did not shut down, the card is still in it", while
+    its own summary line one row above said the card was on nvidia. So the
+    second failure needs evidence the domain state cannot produce, and a task
+    in D is that evidence: nothing else on this host puts modprobe there.
+    """
+    stuck = [f"{comm}({pid})" for comm, pid in d_state_procs()
+             if comm in NVIDIA_INIT_COMMS]
+    if not stuck:
+        return ""
+    return (f"geri: geri-bağlama asıldı — nvidia sürücü init'i D durumunda "
+            f"({' '.join(stuck)}). Misafir kapandı ve kart "
+            f"'{probe.driver_of(dgpu)}' üzerinde görünüyor, ama init bitmedi; "
+            f"libvirtd kendi hook'unda bloke olduğu için virsh de cevap "
+            f"vermiyor. Yığın: journalctl -k -b -g rmapiLockAcquire")
 
 
 def own_card_holders() -> list[str]:
@@ -283,7 +386,7 @@ def preflight(target: Target) -> bool:
     if target.dgpu_audio:
         print(f"   ses   {target.dgpu_audio} → "
               f"{probe.driver_of(target.dgpu_audio)}")
-    print(f"   domain: {_virsh(['domstate', target.domain])[1]}")
+    print(f"   domain: {_virsh(['domstate', target.domain], timeout=20)[1]}")
 
     comp = pid_of(target.compositor)
     print(f"   {target.compositor} pid: {comp or '(yok)'}")
@@ -315,25 +418,45 @@ def preflight(target: Target) -> bool:
         print(f"   Xorg NVIDIA GPU screen: {screens if screens == 0 else 'okunamadı'}")
 
     nodes = session.open_dev_nodes(comp)
+    # Every DRM node is printed with the card it belongs to. The name alone is
+    # not a fact about the hardware -- see probe.render_of() -- so a reader
+    # comparing this line against an earlier run would otherwise be comparing
+    # two different cards without being told.
+    owners = probe.drm_owners()
     print(f"   {target.compositor} açık dri/nvidia fd'leri: "
-          f"{' '.join(sorted(set(nodes))) or '(yok)'}")
+          + (" ".join(f"{n}[{owners[n]}]" if n in owners else n
+                      for n in sorted(set(nodes))) or "(yok)"))
     if any(n.startswith("/dev/nvidia") for n in nodes):
         print("      <-- compositor'ün açık bir nvidia düğümü var")
         ok = False
 
-    # The KMS node is the other way to hold the card, and the one that is easy
+    # The DRM nodes are the other way to hold the card, and the one that is easy
     # to miss: nvidia-smi says None, no /dev/nvidia* fd exists, and nvidia_drm
-    # still sits at refcnt=1. Resolve card* through PCI every time -- the minor
-    # numbers are unstable and change across a handover.
-    dcard = probe.card_of(target.dgpu)
-    if dcard is None:
-        print("   dGPU KMS düğümü: yok")
-    elif f"/dev/dri/{dcard}" in nodes:
-        print(f"   dGPU KMS düğümü: {dcard}  <-- COMPOSITOR TUTUYOR, devir düşer")
-        print("      72-vfio-dgpu-no-uaccess.rules onu uzak tutmamış")
-        ok = False
-    else:
-        print(f"   dGPU KMS düğümü: {dcard}, compositor tutmuyor")
+    # still sits at refcnt=1. Both are resolved through PCI every time -- the
+    # minor numbers are unstable and change across a handover -- and they are
+    # resolved SEPARATELY, because the card and render numberings are handed out
+    # independently of each other (probe.render_of()).
+    #
+    # The render node is asked about at all because the seat rule deliberately
+    # does not cover it: 72-vfio-dgpu-no-uaccess.rules matches card* only, and
+    # says so, to leave render offload working. So an fd on renderD* is not a
+    # rule that failed, it is a client that has to let go -- but it stops the
+    # handover just the same, because it holds nvidia_drm at refcnt=1.
+    for label, node, hint in (
+            ("KMS", probe.card_of(target.dgpu),
+             "      72-vfio-dgpu-no-uaccess.rules onu uzak tutmamış"),
+            ("render", probe.render_of(target.dgpu),
+             "      bu düğümü 72-... kuralı bilerek kapsamıyor — tutan istemci "
+             "kapanmalı (oturumun EGL/GLX/Vulkan pinleri)")):
+        if node is None:
+            print(f"   dGPU {label} düğümü: yok")
+        elif f"/dev/dri/{node}" in nodes:
+            print(f"   dGPU {label} düğümü: {node}  <-- COMPOSITOR TUTUYOR, "
+                  "devir düşer")
+            print(hint)
+            ok = False
+        else:
+            print(f"   dGPU {label} düğümü: {node}, compositor tutmuyor")
 
     would, text = gate_decision(target.domain)
     for line in text.splitlines():
@@ -371,15 +494,23 @@ def settle(seconds: int = 15) -> bool:
 # a round
 # --------------------------------------------------------------------------- #
 
-def _wait_state(domain: str, wanted: str, seconds: int) -> str:
+def _wait_state(domain: str, wanted: str, seconds: int) -> tuple[str, bool]:
+    """(state, unreachable). The second half is the whole point: see TIMED_OUT.
+
+    Reported from the last poll rather than sticky, because a daemon that
+    answered on the way out is a daemon that is running -- the failure being
+    separated out here is one libvirtd never comes back from without a reboot.
+    """
     deadline = time.monotonic() + seconds
-    state = ""
+    state, unreachable = "", False
     while time.monotonic() < deadline:
-        state = _virsh(["domstate", domain], timeout=30)[1]
+        rc, out = _virsh(["domstate", domain], timeout=30)
+        unreachable = rc == TIMED_OUT
+        state = "" if unreachable else out
         if state == wanted:
-            return state
+            return state, False
         time.sleep(2)
-    return state
+    return state, unreachable
 
 
 def wait_for_agent(domain: str, seconds: int) -> int | None:
@@ -429,12 +560,18 @@ def one_round(target: Target, number: int, comp_before: str | None) -> str:
         # is the honest answer, not this exit code.
         verdict = f"start reddedildi: {out}"
     else:
-        state = _wait_state(target.domain, "running", 60)
+        state, unreachable = _wait_state(target.domain, "running", 60)
         driver = probe.driver_of(target.dgpu)
         comp_now = pid_of(target.compositor)
-        print(f"   kart={driver} domain={state} {target.compositor}={comp_now}")
+        print(f"   kart={driver} domain={state or '(cevap yok)'} "
+              f"{target.compositor}={comp_now}")
         if driver != "vfio-pci":
             verdict = f"start: kart '{driver}', beklenen vfio-pci"
+        elif unreachable:
+            wedged = rebind_wedged(target.dgpu)
+            verdict = wedged or (
+                f"start: libvirt cevap vermiyor (domstate zaman aşımı) — "
+                f"kart '{driver}'")
         elif state != "running":
             verdict = f"start: domain '{state}', beklenen running"
         elif comp_now != comp_before:
@@ -458,12 +595,28 @@ def one_round(target: Target, number: int, comp_before: str | None) -> str:
     # that is already off.
     print(f"\n== {target.domain} kapatılıyor")
     _virsh(["shutdown", target.domain], timeout=60)
-    state = _wait_state(target.domain, "shut off", target.shutdown_timeout)
+    state, unreachable = _wait_state(target.domain, "shut off",
+                                     target.shutdown_timeout)
     time.sleep(5)
     driver = probe.driver_of(target.dgpu)
     comp_now = pid_of(target.compositor)
-    print(f"   kart={driver} domain={state} {target.compositor}={comp_now}")
-    if state != "shut off":
+    print(f"   kart={driver} domain={state or '(cevap yok)'} "
+          f"{target.compositor}={comp_now}")
+    wedged = rebind_wedged(target.dgpu) if unreachable else ""
+    if wedged:
+        if not verdict:
+            verdict = wedged
+        print("   !! Bu bir misafir sorunu DEĞİL: misafir kapandı, asılan şey "
+              "geri-bağlama.")
+        print("   !! D durumundaki görev sinyal almaz — kurtarma yalnız reboot.")
+    elif unreachable:
+        # No stuck task and no answer either: say both halves rather than
+        # guessing which one is the fault. libvirtd can also be down for
+        # reasons that have nothing to do with the card.
+        if not verdict:
+            verdict = (f"geri: libvirt cevap vermiyor (domstate zaman aşımı), "
+                       f"ama D durumunda nvidia görevi de yok — kart '{driver}'")
+    elif state != "shut off":
         # Order matters in the verdict as much as in the code: the card being
         # on vfio-pci here is a consequence, not the fault. release/end never
         # ran because the domain never ended, and saying "release/end did not
@@ -604,7 +757,7 @@ def run(rounds: int = 5, domain: str = "win11", compositor: str = "Hyprland",
     print(f"\n\n########## {_now()}  {rounds} tur  profil={p.name}")
     print(f"günlük (paylaşılacak tek dosya): {LOG}")
     print(f"kart: {probe.driver_of(layout.dgpu)}   "
-          f"domain: {_virsh(['domstate', domain])[1]}   "
+          f"domain: {_virsh(['domstate', domain], timeout=20)[1]}   "
           f"{compositor}: {comp_before}")
     print(f"yoklayıcı: {poller or '(yok)'} pid={poller_pid or '-'} "
           f"state={proc_state(poller_pid) or '-'}")
@@ -635,7 +788,7 @@ def run(rounds: int = 5, domain: str = "win11", compositor: str = "Hyprland",
     for number, verdict, delta in results:
         print(f"   tur {number}: {verdict or 'ok':<52} yoklayıcı cpu: +{delta}")
     print(f"\n   kart: {probe.driver_of(layout.dgpu)}   "
-          f"domain: {_virsh(['domstate', domain])[1]}   "
+          f"domain: {_virsh(['domstate', domain], timeout=20)[1]}   "
           f"{compositor}: {pid_of(compositor)} (baştaki {comp_before})")
     if poller:
         print(f"   {poller}: state={proc_state(poller_pid) or 'gitti'} "

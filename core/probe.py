@@ -372,19 +372,58 @@ def read_machine() -> Machine:
     )
 
 
-def card_of(address: str) -> str | None:
-    """The DRM card node of a PCI device, if it has one at this moment.
+def _drm_node_of(address: str, pattern: str) -> str | None:
+    """The DRM node matching `pattern` that belongs to a PCI device, or None.
 
     The discrete card has none while a guest owns it, which is a normal state
-    rather than a failure -- and the reason nothing here keys off card numbers.
-    Connector directories (card0-DP-6) match the same glob but resolve to their
+    rather than a failure -- and the reason nothing here keys off node numbers.
+    Connector directories (card0-DP-6) match the card glob but resolve to their
     card, not to a PCI address, so they cannot be mistaken for one.
     """
-    for card in sorted(DRM_CLASS.glob("card[0-9]*")):
-        device = card / "device"
+    for node in sorted(DRM_CLASS.glob(pattern)):
+        device = node / "device"
         if device.exists() and os.path.basename(os.path.realpath(device)) == address:
-            return card.name
+            return node.name
     return None
+
+
+def card_of(address: str) -> str | None:
+    """The DRM card (KMS) node of a PCI device, if it has one right now."""
+    return _drm_node_of(address, "card[0-9]*")
+
+
+def render_of(address: str) -> str | None:
+    """The DRM render node of a PCI device, if it has one right now.
+
+    A SEPARATE LOOKUP, NOT AN OFFSET FROM card_of(). The two numberings are
+    handed out independently, so "card0 means renderD128" is a coincidence of
+    registration order rather than a fact -- measured 2026-08-18 on this
+    laptop, the dGPU was card0 *and* renderD129 while the integrated GPU was
+    card1 and renderD128. A check written against the node name therefore names
+    the discrete card on one boot and the integrated one on the next, which is
+    the same class of mistake as keying a udev rule on a PCI address.
+    """
+    return _drm_node_of(address, "renderD[0-9]*")
+
+
+def drm_owners() -> dict[str, str]:
+    """"/dev/dri/<node>" -> PCI address, for every DRM node that has one.
+
+    So that a list of open fds can be read without knowing this boot's
+    numbering: "renderD128" says nothing on its own, "renderD128[0000:06:00.0]"
+    says which card the process is actually holding.
+    """
+    owners: dict[str, str] = {}
+    for pattern in ("card[0-9]*", "renderD[0-9]*"):
+        for node in sorted(DRM_CLASS.glob(pattern)):
+            if "-" in node.name:
+                continue  # a connector directory, not a device node
+            device = node / "device"
+            if not device.exists():
+                continue
+            owners[f"/dev/dri/{node.name}"] = os.path.basename(
+                os.path.realpath(device))
+    return owners
 
 
 def driver_of(address: str) -> str:
