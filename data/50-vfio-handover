@@ -527,7 +527,28 @@ reload_nvidia() {
     local svc
     modprobe nvidia_drm 2>&1 | while IFS= read -r line; do log "modprobe: $line"; done
     for svc in $NVIDIA_SERVICES; do
-        systemctl start "$svc" 2>/dev/null
+        # WHY reset-failed, AND WHY THE START IS NO LONGER SILENT.
+        #
+        # Every handover stops these services and starts them again, so a
+        # machine that hands the card over N times issues N starts -- and
+        # systemd rate-limits that. nvidia-powerd ships StartLimitBurst=5,
+        # which a single five-round acceptance run reaches on its own.
+        # Measured 2026-08-18: the sixth start was refused with "Start request
+        # repeated too quickly", the unit went to failed, and it stayed dead
+        # for the next 40 minutes across three more handovers. Nothing said so
+        # -- the start's exit code was thrown away, and the log line the hook
+        # does print is "card returned to the host", which by then was only
+        # true of the card.
+        #
+        # reset-failed clears the rate-limit counter without touching a healthy
+        # unit, so it is a no-op on every handover but the ones that need it.
+        # It cannot rescue a service that fails for its own reasons, which is
+        # exactly why the start below now reports instead of swallowing: this
+        # function is the undo, and an undo that quietly does half its job is
+        # the failure mode this whole script is written against.
+        systemctl reset-failed "$svc" 2>/dev/null
+        systemctl start "$svc" 2>/dev/null \
+            || log "WARN: $svc did not start -- the card is back but the host is not"
     done
 }
 
