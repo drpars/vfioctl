@@ -3,6 +3,7 @@
     ./vfioctl guest build            # the whole round, ~7-10 min, unattended
     ./vfioctl guest setup            # push and drive the guest-side scripts
     ./vfioctl guest passthrough      # give the domain the dGPU (or --off)
+    ./vfioctl guest nvme             # give the domain a whole NVMe controller
     ./vfioctl guest status           # where is it now
     ./vfioctl guest screenshot       # what is on its screen
     ./vfioctl guest autologon        # re-run just the console-session step
@@ -597,6 +598,178 @@ def _matches(block: str, address: str) -> bool:
     return all(f"{key}='0x{parts[key]:0{width}x}'" in block
                for key, width in (("domain", 4), ("bus", 2),
                                   ("slot", 2), ("function", 1)))
+
+
+# --------------------------------------------------------------------------- #
+# handing a whole NVMe controller to the domain
+# --------------------------------------------------------------------------- #
+
+# managed='yes' HERE, AND managed='no' FOR THE CARD -- THE DIFFERENCE IS WHO
+# BINDS, AND IT IS THE SAME ONE-WRITER RULE IN BOTH CASES.
+#
+# The card has a writer already: the handover hook, which has to unload the
+# nvidia stack in a particular order before anything touches unbind. Letting
+# libvirt detach it too would put a second writer on the same sysfs paths, and
+# a second writer is what wedged this machine three times. So the card is
+# managed='no' -- the hook binds, libvirt only opens what it is given.
+#
+# A disk has no such writer and needs none. There is no module to unload, no
+# poller reading driver_override, no desktop holding a device node: the nvme
+# driver releases the controller on unbind and takes it back on probe.
+# Measured 2026-08-18 on this machine, on the empty Crucial (0000:02:00.0):
+# driver_override -> nvme/unbind -> drivers_probe put it on vfio-pci, created
+# /dev/vfio/15, and removed it from lsblk; the symmetric undo brought nvme0 and
+# the by-id links back. Not one kernel-log line either way.
+#
+# So for a disk libvirt is the ONLY writer, and managed='yes' is what makes it
+# the only one -- it binds at domain start and gives the controller back at
+# domain stop, in the same three writes measured above. The alternative that
+# was NOT taken: a boot-time rule (modprobe.d ids= or a udev driver_override)
+# that keeps the disk on vfio-pci permanently. It would have to key on
+# vendor:device, which names a *model* and not a drive -- on a machine whose
+# boot disk is the same model it would claim the boot disk, before any of this
+# tool's protections can run, and the symptom is a machine that does not boot.
+# K14's hard protection can only be honest if it runs where it can read the
+# host's mounts and fstab, and that is here, not in early boot.
+NVME_HOSTDEV_XML = """    <hostdev mode='subsystem' type='pci' managed='yes'>
+      <source>
+        <address domain='0x{domain:04x}' bus='0x{bus:02x}' \
+slot='0x{slot:02x}' function='0x{function:x}'/>
+      </source>
+    </hostdev>
+"""
+
+
+def nvme_item(address: str):
+    """core.inventory's verdict for one PCI address, or a refusal.
+
+    THE VERDICT IS NOT RE-DERIVED HERE. core.inventory owns "may this device
+    move and what does the host lose" for every bus, and it is the half of K14
+    that was written before anything existed that could hand a disk over. A
+    second table in this file would be a second answer, and the one that
+    drifted would be the one nobody reads until it lets a mounted disk through.
+    """
+    sys.path.insert(0, str(HERE.parent))
+    from core import inventory, probe
+    from core import profile as profile_mod
+
+    machine = probe.read_machine()
+    p = profile_mod.select(machine.dmi_vendor, machine.dmi_product)
+    items, _ = inventory.pci_items(machine, p, inventory.host_storage_claims(),
+                                   probe.usb_devices())
+    for item in items:
+        if item.ident == address:
+            return item, inventory
+    die(f"{address} bu makinede bir PCI cihazı değil. "
+        f"Ne var: {self_cmd('inventory')}")
+
+
+def cmd_nvme(a):
+    """Give a whole NVMe controller to a shut-off domain, take it back, or ask.
+
+    WHY A CONTROLLER AND NOT A DISK IMAGE. `--disk` elsewhere in this file is a
+    qcow2 file the host owns and qemu reads; this is the physical controller,
+    handed over whole. The two are opposite in every way that matters, which is
+    why this subcommand is `nvme` and not `disk`: the guest gets the drive with
+    its own queues and its own NVMe namespace, and the host stops seeing it at
+    all for as long as the domain runs.
+
+    IT IS ALL OR NOTHING, AND THAT IS THE HARDWARE TALKING. A PCI handover moves
+    the whole IOMMU group; there is no half of a controller. If the host wants
+    to keep using part of that drive the answer is not this command -- it is a
+    raw partition on a virtio-blk disk, with the controller left where it is.
+
+    IT ONLY EDITS A SHUT-OFF DOMAIN, for the same reason `passthrough` does: the
+    bind happens when libvirt starts the domain. Attaching to a running guest
+    asks it to bind the controller there and then, while the host may still have
+    the drive mounted.
+
+    THE EDIT IS A TEXT INSERTION, not an XML round trip -- the stored XML
+    carries blocks this script did not write (libosinfo metadata, the ownership
+    mark, the qemu:commandline that carries Looking Glass) and re-serialising
+    all of them to change one is how one of them quietly comes back different.
+    """
+    if not domain_exists(a.name):
+        die(f"'{a.name}' tanımlı değil")
+
+    held = sorted(c for c in pci_claims(a.name) if _is_nvme(c))
+    if not a.attach and not a.detach:
+        say(f"'{a.name}' aldığı NVMe denetleyicileri: "
+            f"{' '.join(held) or '(yok)'}")
+        for addr in held:
+            say(f"  {addr} şu an host'ta: {host_driver_of(addr)}")
+        say(f"Aday olanlar: {self_cmd('inventory')}")
+        return 0
+
+    state = domain_state(a.name)
+    if state != "shut off":
+        die(f"'{a.name}' şu an '{state}' -- denetleyici yalnızca kapalı bir "
+            f"domain'e eklenir. Bağlamayı libvirt domain açılırken yapar.")
+
+    address = (a.attach or a.detach).lower()
+    address_parts(address)          # refuses a malformed address before anything
+
+    xml = virsh("dumpxml", a.name).stdout
+    blocks = [b for b in HOSTDEV_BLOCK.findall(xml) if _matches(b, address)]
+
+    if a.detach:
+        if not blocks:
+            say(f"'{a.name}' zaten {address}'i almıyor -- değişiklik yok")
+            return 0
+        for block in blocks:
+            xml = xml.replace(block, "", 1)
+    else:
+        item, inv = nvme_item(address)
+        # The subcommand's name is a promise about what moves. Without this the
+        # verdict alone would let a Wi-Fi card through `nvme --attach`, because
+        # inventory rightly judges it "uyarı" and not "red" -- a true answer to
+        # a question this command is not asking.
+        if not _is_nvme(address):
+            die(f"{address} bir NVMe denetleyicisi değil ({item.title}). "
+                f"Bu komut yalnızca depolama denetleyicisi devreder.")
+        say(f"{item.ids} — {item.title} (grup {item.group or '?'}, "
+            f"host sürücüsü {item.driver})")
+        for reason in item.reasons:
+            say(f"  {reason}")
+        if item.verdict == inv.REFUSE:
+            die(f"{address} devredilemez -- yukarıdaki gerekçe. "
+                f"Bu K14'ün sert koruması ve bayrağı yoktur.")
+        if blocks:
+            say(f"'{a.name}' {address}'i zaten alıyor -- değişiklik yok")
+            return 0
+        xml = xml.replace("  </devices>",
+                          NVME_HOSTDEV_XML.format(**address_parts(address))
+                          + "  </devices>", 1)
+
+    redefine(xml)
+
+    # Read back rather than trust the define: a lost ownership mark or a dropped
+    # ivshmem block only surfaces as "Looking Glass shows nothing" much later.
+    after = virsh("dumpxml", a.name).stdout
+    claims = pci_claims(a.name)
+    say(f"'{a.name}' aldığı PCI işlevleri: {' '.join(sorted(claims)) or '(yok)'}")
+    say(f"  işaret: {'duruyor' if marker_of(a.name) else 'YOK -- kaybolmuş'}")
+    say(f"  ivshmem: {'duruyor' if 'mem-path' in after else 'yok'}")
+    if a.detach:
+        if address in claims:
+            die(f"çıkarılamadı -- domain hâlâ istiyor: {address}")
+    else:
+        if address not in claims:
+            die(f"eklenemedi -- eksik: {address}")
+        say(f"  {address} şu an host'ta: {host_driver_of(address)} "
+            f"(domain kapalıyken host'undur, bağlamayı libvirt açılışta yapar)")
+        say("Misafir onu boş bir disk olarak görür; bölümlemeyi misafir yapar.")
+    return 0
+
+
+def _is_nvme(address: str) -> bool:
+    """Is that PCI function an NVMe controller on this machine right now?"""
+    sys.path.insert(0, str(HERE.parent))
+    from core import probe
+    for device in probe.read_machine().devices:
+        if device.address == address:
+            return device.pci_class.startswith("0x0108")
+    return False
 
 
 # --------------------------------------------------------------------------- #
@@ -2283,6 +2456,14 @@ def main(argv: list[str] | None = None) -> int:
     u.add_argument("--detach", metavar="VENDOR:PRODUCT", default="",
                    help="aygıtı host'a geri al")
     u.set_defaults(func=cmd_usb)
+
+    nv = sub.add_parser("nvme",
+                        help="NVMe denetleyicisini domain'e ver ya da geri al")
+    nv.add_argument("--attach", metavar="PCI", default="",
+                    help="devredilecek denetleyicinin PCI adresi (0000:02:00.0)")
+    nv.add_argument("--detach", metavar="PCI", default="",
+                    help="domain'den çıkarılacak denetleyicinin PCI adresi")
+    nv.set_defaults(func=cmd_nvme)
 
     pt = sub.add_parser("passthrough", help="kartı domain'e ver ya da geri al")
     pt.add_argument("--off", action="store_true", help="kartı domain'den çıkar")

@@ -132,8 +132,8 @@ ekranını taşıyacak ikinci bir GPU bulunması.
 ./vfioctl inventory       # PCI + USB, her cihazın host'a bedeliyle
 ```
 
-**Yalnızca rapordur, hiçbir şey uygulamaz** — uygulayan tek komut aşağıdaki
-`guest usb` ve o da hükmü buradan sorar. Cevapladığı soru "yapılabilir mi"
+**Yalnızca rapordur, hiçbir şey uygulamaz** — uygulayan iki komut aşağıdaki
+`guest usb` ile `guest nvme`, ve ikisi de hükmü buradan sorar. Cevapladığı soru "yapılabilir mi"
 değil — neredeyse her cihaz teknik olarak ayrılabilir —
 **"host ne kaybeder"**. `doctor`'dan ayrı bir komut olması bilerek: `doctor`'ın
 tek bir hükmü var ve otuz satırlık bir döküm onu gömer, üstelik envanter tam da
@@ -188,6 +188,50 @@ sürücüleri** okur (`btusb` gitti mi), domain'in canlı XML'ini okur, ve ajan
 varsa **misafirin kendi aygıt envanterini** sorar (`Get-PnpDevice`). Aynı
 `vendor:product`'tan iki tane takılıysa devir yapılmaz — libvirt hangisini
 alacağını ayırt edemez.
+
+### Bütün bir NVMe denetleyicisini misafire vermek
+
+```sh
+./vfioctl guest --name win11 nvme                          # domain'de hangisi var
+./vfioctl guest --name win11 nvme --attach 0000:02:00.0     # ver
+./vfioctl guest --name win11 nvme --detach 0000:02:00.0     # geri al
+```
+
+Denetleyiciyi **bütün olarak** verir: misafir diski kendi kuyrukları ve kendi
+NVMe ad alanıyla görür, host onu domain koştuğu sürece hiç görmez. Misafir oraya
+kurulabilir; bölümlemeyi misafir yapar.
+
+**Hep ya hiç, ve bunu donanım söylüyor.** PCI devri bütün IOMMU grubunu taşır,
+denetleyicinin yarısı diye bir şey yok. Diskin bir kısmı host'ta kalacaksa cevap
+bu komut değil: denetleyici yerinde bırakılır ve misafire ham bölüm verilir
+(virtio-blk).
+
+**Red K14'ün sert korumasıdır ve bayrağı yoktur.** Bağlı, `fstab`'da duran ya da
+takas alan bir disk devredilmez; hükmü bu komut türetmez, `inventory`'den sorar —
+tek sahip, çünkü ikinci bir tablo sessizce kayan tablo olur. Ölçüldü: boot diski
+(`0000:05:00.0`) gerekçesiyle birlikte reddediliyor, XML'e dokunulmadan.
+
+**`managed='yes'` — kartın tersi, ve aynı ilkeden.** Kartın zaten bir yazarı var:
+devir hook'u, nvidia yığınını belirli bir sırayla boşaltmak zorunda. Oraya
+libvirt'i de sokmak aynı sysfs yollarına ikinci bir yazar koymak olurdu, ve bu
+makineyi üç kez kilitleyen şey tam olarak buydu — o yüzden kart `managed='no'`.
+Diskin böyle bir yazarı yok ve gerekmiyor: `nvme` unbind'da bırakıyor, probe'da
+geri alıyor. Yani disk için **tek yazar libvirt'tir**, ve `managed='yes'` onu tek
+yazar yapan şeydir. Hook etkilenmiyor (ölçüldü: disk eklenmiş XML'de
+`configured:` yalnız kartın iki işlevi, `hostdev:` üçü — karar değişmiyor).
+
+**Boot'ta kalıcı bağlama BİLEREK yapılmadı.** `modprobe.d ids=` ya da udev
+`driver_override` diski her açılışta `vfio-pci`'ye çivilerdi, ama anahtarı
+`vendor:device` olurdu — o bir **model** adıdır, sürücünün kendisi değil. Boot
+diski aynı modelden olan bir makinede kural boot diskini kapar, üstelik bu
+aracın korumaları koşamadan; belirtisi açılmayan makinedir. K14'ün koruması
+ancak host'un bağlarını ve `fstab`'ını okuyabildiği yerde dürüst olabilir, o yer
+de burasıdır — erken boot değil.
+
+**Neden `passthrough`'un bir bayrağı değil:** ikisi de kapalı domain'i düzenler,
+ama `passthrough` kartı verir ve kartı hook taşır; bu komut depolama verir ve
+onu libvirt taşır. Tek bayrağa indirmek, iki farklı taşıyıcıyı tek adın altına
+saklamak olurdu.
 
 ### Host kurulumu
 
@@ -258,6 +302,7 @@ arda beş kez.
 ./vfioctl guest build --user <ad> --password-file <yol>
 ./vfioctl guest setup          # (kart varsa NVIDIA) → VDD → Looking Glass → tek ekran
 ./vfioctl guest passthrough    # domain'e kartı ver (geri almak: --off)
+./vfioctl guest nvme --attach 0000:02:00.0   # domain'e NVMe denetleyicisi ver
 ./vfioctl guest setup --start  # domain'i başlat + turu koş (kartlıysa: düz VT)
 ./vfioctl guest status
 ./vfioctl guest clean
