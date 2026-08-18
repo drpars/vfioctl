@@ -619,18 +619,29 @@ def _matches(block: str, address: str) -> bool:
 # Measured 2026-08-18 on this machine, on the empty Crucial (0000:02:00.0):
 # driver_override -> nvme/unbind -> drivers_probe put it on vfio-pci, created
 # /dev/vfio/15, and removed it from lsblk; the symmetric undo brought nvme0 and
-# the by-id links back. Not one kernel-log line either way.
+# the by-id links back.
 #
 # So for a disk libvirt is the ONLY writer, and managed='yes' is what makes it
 # the only one -- it binds at domain start and gives the controller back at
-# domain stop, in the same three writes measured above. The alternative that
-# was NOT taken: a boot-time rule (modprobe.d ids= or a udev driver_override)
-# that keeps the disk on vfio-pci permanently. It would have to key on
-# vendor:device, which names a *model* and not a drive -- on a machine whose
-# boot disk is the same model it would claim the boot disk, before any of this
-# tool's protections can run, and the symptom is a machine that does not boot.
-# K14's hard protection can only be honest if it runs where it can read the
-# host's mounts and fstab, and that is here, not in early boot.
+# domain stop.
+#
+# IT DOES NOT DO IT IN THOSE THREE WRITES, AND THE KERNEL LOG IS NOT SILENT.
+# An earlier revision of this comment said both, and a real round measured on
+# 2026-08-18 says otherwise: on the way out libvirt also resets the function
+# ("vfio-pci 0000:02:00.0: resetting" / "reset done"), and the way back is a
+# full nvme probe -- seven lines, byte for byte the ones this drive already
+# prints at boot ("missing or invalid SUBNQN field", "Ignoring bogus Namespace
+# Identifiers", ...). None of it is an error. It is written down because the
+# opposite claim invites the mistake it caused: a round that greps the kernel
+# log without comparing against boot reads the return leg as a fault.
+#
+# The alternative that was NOT taken: a boot-time rule (modprobe.d ids= or a
+# udev driver_override) that keeps the disk on vfio-pci permanently. It would
+# have to key on vendor:device, which names a *model* and not a drive -- on a
+# machine whose boot disk is the same model it would claim the boot disk,
+# before any of this tool's protections can run, and the symptom is a machine
+# that does not boot. K14's hard protection can only be honest if it runs where
+# it can read the host's mounts and fstab, and that is here, not in early boot.
 NVME_HOSTDEV_XML = """    <hostdev mode='subsystem' type='pci' managed='yes'>
       <source>
         <address domain='0x{domain:04x}' bus='0x{bus:02x}' \
