@@ -198,8 +198,13 @@ alacağını ayırt edemez.
 ```
 
 Denetleyiciyi **bütün olarak** verir: misafir diski kendi kuyrukları ve kendi
-NVMe ad alanıyla görür, host onu domain koştuğu sürece hiç görmez. Misafir oraya
-kurulabilir; bölümlemeyi misafir yapar.
+NVMe ad alanıyla görür, host onu domain koştuğu sürece hiç görmez; bölümlemeyi
+misafir yapar.
+
+**Ama misafiri buraya kuran bir komut bugün yok.** Donanım yolu açık — misafir
+diski yerli NVMe olarak görüyor, ölçüldü — ancak `guest build` sistem diskini
+her zaman bir qcow2 imajına kurar ve bu komut misafire **ikinci** bir disk
+verir. Sıfırdan fiziksel NVMe'ye kurulum yazılmadı.
 
 **Hep ya hiç, ve bunu donanım söylüyor.** PCI devri bütün IOMMU grubunu taşır,
 denetleyicinin yarısı diye bir şey yok. Diskin bir kısmı host'ta kalacaksa cevap
@@ -383,14 +388,14 @@ dahil) → [docs/bluetooth-code10.md](docs/bluetooth-code10.md).
 | 1 | kapı: donanım profili biçimi, `doctor`, seans yarısının ölçümü ✅ |
 | 2 | host kurulumu: devir hook'u, udev kuralları, Looking Glass host yarısı ✅ |
 | 3 | misafir inşasının kalan yarısı: misafir betiklerini süren kod ✅ |
-| 4 | envanter ✅, oturuma bağlı USB devri ✅, disk devri ← **buradayız** |
+| 4 | envanter ✅, oturuma bağlı USB devri ✅, disk devri ✅ |
 
 Faz 4'ün iki yarısı birbirinin küçük kardeşi değil, ayrı iki mekanizma.
 **Oturuma bağlı USB devri** koşan misafire ödünç verir, hiçbir yere yazmaz,
-misafir kapanınca geri alınır. **Disk devri** ise kurulum zamanına ve kalıcı
-tanıma ait — misafir oraya kurulabilir — ve K14'ün sert korumasının muhatabı o.
-İkincisi bu makinede ancak ikinci bir NVMe takıldığında yazılabilir; reddetme
-yolu bugün envanterde yazılı ve ölçülü.
+misafir kapanınca geri alınır. **Disk devri** ise kalıcı tanıma ait ve K14'ün sert
+korumasının muhatabı o; misafir denetleyiciyi boş bir disk olarak görür.
+Reddetme yolu envanterde yazılı ve ölçülü. **Sistem diskini fiziksel NVMe yapan
+bir kurulum kipi yok** — `build` her zaman qcow2'ye kurar.
 
 Faz 3'ün kabul ölçütü bu makinede karşılandı: kartsız prova ve kartlı tur geçti
 (LG host günlüğü kartı adıyla yazıp `Capture Start` dedi, VDD ekranı 2560x1440),
