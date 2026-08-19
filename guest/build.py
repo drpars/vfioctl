@@ -743,8 +743,19 @@ def owned_image(a) -> Path | None:
 
 
 def defined_domains() -> list[str]:
+    """Every defined domain by name, one per line as virsh prints them.
+
+    SPLIT ON LINES, NOT ON WHITESPACE. libvirt allows a space in a domain name,
+    and splitting on whitespace turns one such domain into two names that
+    resolve to nothing -- so every claim it holds disappears. That silence
+    reaches three guards that are all written to refuse: disk_claimants(),
+    guard_nvme_free() and guard_exclusive_devices(). A vanished claim does not
+    make them refuse louder, it makes them pass.
+    """
     r = virsh("list", "--all", "--name", check=False)
-    return [n for n in r.stdout.split() if n] if r.returncode == 0 else []
+    if r.returncode != 0:
+        return []
+    return [n for n in (line.strip() for line in r.stdout.splitlines()) if n]
 
 
 def disk_claimants(disk: Path, exclude: str) -> list[str]:
