@@ -284,8 +284,9 @@ bir `non-zero usage count` yok. Misafir her turda 15–20 sn'de ayağa kalktı.
 
 **Düz bir VT'den (Ctrl+Alt+F3) ya da başka bir makineden ssh ile koşulur** —
 aradığı arıza grafik oturumunu öldüren arızadır, o oturumun içindeki bir kabuk
-onunla birlikte ölür. Çıktı `/tmp/vfioctl-selftest.log`'a da yazılır, sonuç bu
-yüzden okuyucudan sağ çıkar.
+onunla birlikte ölür. Çıktı `$XDG_STATE_HOME/vfioctl/selftest.log`'a da yazılır
+(öntanımlı `~/.local/state/vfioctl/selftest.log`), sonuç bu yüzden okuyucudan
+sağ çıkar. `/tmp`'de değil: kurtarması reboot olan arıza günlüğü de siliyordu.
 
 **Yoklayıcı testin parçasıdır.** Kartı saniyede bir açan kısa ömürlü bir süreç
 (bu makinede waybar'ın `gputemp` modülü) devri deterministik olmaktan çıkarıp
