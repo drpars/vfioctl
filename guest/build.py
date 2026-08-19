@@ -742,20 +742,15 @@ def owned_image(a) -> Path | None:
     return DEFAULT_DISK if a.name == DEFAULT_NAME else None
 
 
+# THE GUARDS READ WITH NO TIMEOUT, AND THAT IS THE WHOLE POINT OF PASSING ONE.
+# core.domains bounds its reads for the report, where a hang helps nobody. Here
+# a bound would be the opposite of a safety feature: every guard below refuses
+# on a NON-EMPTY answer, so "libvirtd did not answer in five seconds" would
+# arrive as "nothing claims this" and the guard would pass. Hanging until the
+# operator interrupts is loud; passing is silent, and this machine is on record
+# wedging libvirtd inside the tool's own hook.
 def defined_domains() -> list[str]:
-    """Every defined domain by name, one per line as virsh prints them.
-
-    SPLIT ON LINES, NOT ON WHITESPACE. libvirt allows a space in a domain name,
-    and splitting on whitespace turns one such domain into two names that
-    resolve to nothing -- so every claim it holds disappears. That silence
-    reaches three guards that are all written to refuse: disk_claimants(),
-    guard_nvme_free() and guard_exclusive_devices(). A vanished claim does not
-    make them refuse louder, it makes them pass.
-    """
-    r = virsh("list", "--all", "--name", check=False)
-    if r.returncode != 0:
-        return []
-    return [n for n in (line.strip() for line in r.stdout.splitlines()) if n]
+    return _core_domains().defined_domains(timeout=None)
 
 
 def disk_claimants(disk: Path, exclude: str) -> list[str]:
@@ -848,40 +843,13 @@ def guard_exclusive_devices(name: str):
 
 
 def domain_claims(name: str) -> set[str]:
-    """Host devices the domain takes exclusively: PCI functions and mem-paths.
-
-    The mem-path comes out of qemu:commandline with a regex rather than an XML
-    walk, because the argument is a JSON string inside an attribute and libvirt
-    is free to hand it back with either quoting style.
-    """
-    r = virsh("dumpxml", name, check=False)
-    if r.returncode != 0:
-        return set()
-    claims = {f"mem-path:{p}" for p in
-              re.findall(r"mem-path[\"']?\s*:\s*[\"']([^\"']+)", r.stdout)}
-    try:
-        root = ElementTree.fromstring(r.stdout)
-    except ElementTree.ParseError:
-        return claims
-    for hostdev in root.findall("./devices/hostdev[@type='pci']"):
-        addr = hostdev.find("./source/address")
-        if addr is None:
-            continue
-        try:
-            claims.add("{:04x}:{:02x}:{:02x}.{}".format(
-                int(addr.get("domain", "0x0"), 16),
-                int(addr.get("bus", "0x0"), 16),
-                int(addr.get("slot", "0x0"), 16),
-                int(addr.get("function", "0x0"), 16),
-            ))
-        except ValueError:
-            continue
-    return claims
+    """Host devices the domain takes exclusively: PCI functions and mem-paths."""
+    return _core_domains().claims_of(name, timeout=None)
 
 
 def pci_claims(name: str) -> set[str]:
     """Only the PCI half of domain_claims -- i.e. does this domain take the card."""
-    return {c for c in domain_claims(name) if not c.startswith("mem-path:")}
+    return _core_domains().pci_claims_of(name, timeout=None)
 
 
 def host_driver_of(address: str) -> str:
@@ -1522,28 +1490,32 @@ def _core_probe():
     return probe
 
 
+def _core_domains():
+    """core.domains, imported late and by path like the rest of core.
+
+    It owns "which domain claims which host device" for both readers -- these
+    guards and core.inventory's report. A second copy here would be the table
+    that drifts, and the guards are the half where drift is expensive.
+    """
+    if str(HERE.parent) not in sys.path:
+        sys.path.insert(0, str(HERE.parent))
+    from core import domains
+    return domains
+
+
 def domain_usb(name: str) -> list[tuple[str, str]]:
     """(vendor, product) of every USB device the domain holds right now.
 
     Read from the live XML rather than remembered, because that is the only
     record there is: an attach made this way is never written to the persistent
     definition, so libvirt's running copy is the single source of truth.
+
+    Split back into a pair here rather than in core.domains, which speaks the
+    "vendor:product" that core.inventory prints as `ids`; this file compares
+    against probe's two separate fields.
     """
-    r = virsh("dumpxml", name, check=False)
-    if r.returncode != 0:
-        return []
-    try:
-        root = ElementTree.fromstring(r.stdout)
-    except ElementTree.ParseError:
-        return []
-    out = []
-    for hostdev in root.findall("./devices/hostdev[@type='usb']/source"):
-        vendor, product = hostdev.find("vendor"), hostdev.find("product")
-        if vendor is None or product is None:
-            continue
-        out.append((vendor.get("id", "").removeprefix("0x").lower(),
-                    product.get("id", "").removeprefix("0x").lower()))
-    return out
+    return [tuple(ids.split(":", 1))                     # type: ignore[misc]
+            for ids in sorted(_core_domains().usb_claims_of(name, timeout=None))]
 
 
 def host_drivers_of(usb_name: str) -> list[str]:
