@@ -31,6 +31,18 @@ thing, so the name is a flag with a default, and --no-poller runs the
 deliberately quiet baseline -- which answers the easy half of the question and
 is not an acceptance run.
 
+WHICH GUEST IS AN ARGUMENT WITH NO DEFAULT, AND THE ASYMMETRY IS THE POINT.
+--rounds, --compositor and --poller default because they say HOW to test.
+--domain says WHAT, and a tool that picks its own target can end up measuring
+something other than what the reader believes it measured. The default used to
+be `win11`, the guest this was written against; when the working guest moved to
+`win11-nvme` the old name kept resolving, so a bare `selftest` would have run
+five rounds against a guest nobody uses and reported it as the acceptance
+criterion, with nothing in the output naming which one it took. A name in the
+source protects the machine it was written on and nothing else. So a missing
+--domain is a refusal that prints the defined domains, on the same rule as the
+missing tty below: a question nobody answered is not a yes.
+
 WHERE TO RUN IT. A shell that survives the graphics session dying, because that
 is exactly the failure being hunted: a plain VT (Ctrl+Alt+F3) or ssh FROM
 ANOTHER MACHINE. `ssh localhost` from a terminal inside the session is not one
@@ -49,7 +61,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from . import hostfiles, install as install_mod, probe, provenance, session
+from . import (domains, hostfiles, install as install_mod, probe,
+               provenance, session)
 
 # Where this goes and why is hostfiles.state_log; it is one rule for every
 # round that writes a transcript, and this file is where it was measured.
@@ -647,7 +660,29 @@ def one_round(target: Target, number: int, comp_before: str | None) -> str:
     return verdict
 
 
-def run(rounds: int = 5, domain: str = "win11", compositor: str = "Hyprland",
+def _defined_domains_block() -> str:
+    """The names to choose from, or an honest line about why there are none.
+
+    IT DOES NOT CLAIM TO TELL "none defined" FROM "could not ask". Those come
+    back as the same empty list -- defined_domains() returns names, not rc --
+    so this prints both readings instead of picking one and being wrong half
+    the time.
+
+    THE CALL IS BOUNDED, unlike the guards. core/domains.py's rule is that a
+    guard passes None because a timeout must not make it fall open; this is a
+    reporting path, where the opposite holds -- a refusal that hangs on a
+    wedged libvirtd is worse than one that says the list went unread.
+    """
+    if not domains.available():
+        return "\n   (virsh yok — liste sorulamadı)"
+    names = domains.defined_domains(timeout=domains.CONNECT_TIMEOUT)
+    if not names:
+        return ("\n   (tanımlı domain yok, ya da virsh cevap vermedi — bu iki "
+                "cevap ayırt edilmiyor)")
+    return "".join(f"\n   {n}" for n in names)
+
+
+def run(rounds: int = 5, domain: str | None = None, compositor: str = "Hyprland",
         poller: str | None = "waybar", profile_name: str | None = None,
         assume_yes: bool = False, preflight_only: bool = False,
         boot_timeout: int = 300, shutdown_timeout: int = 300) -> int:
@@ -661,6 +696,22 @@ def run(rounds: int = 5, domain: str = "win11", compositor: str = "Hyprland",
     from . import doctor
 
     sys.stdout = Tee(LOG)  # type: ignore[assignment]
+
+    # BEFORE THE GATE AND THE LAYOUT, because this one is not about the
+    # machine: nothing here can be answered by looking at hardware, and a
+    # reader who forgot the flag should not first be told what is wrong with
+    # their host.
+    if domain is None:
+        print("`--domain` verilmedi — ve varsayılanı yok: hedefi bu araç "
+              "seçmez.")
+        print("Eskiden `win11` idi. Bu makinenin misafiri değişince eski ad "
+              "çözünmeye devam etti, yani çağrı hata vermeden beş turu başka "
+              "bir misafirde koşar ve sonucu bu farkı hiç söylemeden "
+              "raporlardı.")
+        print(f"\n== Tanımlı domain'ler{_defined_domains_block()}")
+        print(f"\nHedefi seçip yeniden çağır: "
+              f"{provenance.command(*sys.argv[1:], '--domain', '<ad>')}")
+        return 2
 
     open_gate, p, _ = doctor.gate(profile_name)
     if not open_gate or p is None:
@@ -693,9 +744,12 @@ def run(rounds: int = 5, domain: str = "win11", compositor: str = "Hyprland",
     if not assume_yes:
         # The suggested line is this invocation plus --yes, not a rebuilt one:
         # a hint spelled `selftest --yes` from a run that said `--domain
-        # win11-test --rounds 1` would point five rounds at the DEFAULT domain,
-        # which is the working guest. --yes is valid last, after the
-        # subcommand's own flags, so appending is enough.
+        # win11-test --rounds 1` drops both flags. Since --domain lost its
+        # default that second one now refuses rather than silently retargeting
+        # -- which is exactly what it used to do -- but the reason to append is
+        # unchanged: the rounds somebody consents to have to be the rounds they
+        # asked for. --yes is valid last, after the subcommand's own flags, so
+        # appending is enough.
         deliberate = provenance.command(*sys.argv[1:], "--yes")
         if not sys.stdin.isatty():
             print("Bu çağrının tty'si yok, yani düz VT sorusu sorulamıyor — ve "

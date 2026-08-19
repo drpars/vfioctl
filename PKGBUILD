@@ -12,7 +12,8 @@
 #
 # NOTHING IS WRITTEN INSIDE THE TREE AT RUNTIME, which is what makes a
 # root-owned install directory safe: guest/build.py stages under ~/.images,
-# selftest logs to /tmp, and the only other writer is core/sysfile.py, which
+# transcripts go to $XDG_STATE_HOME/vfioctl, and the only other writer is
+# core/sysfile.py, which
 # goes to /etc through sudo. If a future subcommand wants to write next to its
 # own code, this layout is what it breaks.
 #

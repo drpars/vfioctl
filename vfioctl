@@ -7,7 +7,7 @@
     ./vfioctl install             # write the host-side setup
     ./vfioctl install --check     # compare /etc with what install would write
     ./vfioctl uninstall           # take it back out
-    ./vfioctl selftest            # five handover rounds, judged and logged
+    ./vfioctl selftest --domain X # five handover rounds, judged and logged
     ./vfioctl guest setup         # the guest side -- `guest --help` for its own
 
 NO SUBCOMMAND DERIVES ITS OWN VERSION OF THE GATE'S QUESTION. doctor.gate()
@@ -208,7 +208,13 @@ def main() -> int:
     st = sub.add_parser("selftest", help="devri art arda N tur koş ve yargıla")
     st.add_argument("--rounds", type=int, default=5,
                     help="tur sayısı (varsayılan 5 — kabul ölçütü)")
-    st.add_argument("--domain", default="win11", help="libvirt domain adı")
+    # NO DEFAULT, DELIBERATELY -- core/selftest.py's docstring holds the
+    # reason. argparse's own required=True would exit 2 as well, but it
+    # cannot print the domains this machine actually defines, and the
+    # refusal lives in run() so that it also holds for a caller that
+    # imports the module instead of typing the flag.
+    st.add_argument("--domain", default=None,
+                    help="libvirt domain adı (zorunlu — varsayılanı yok)")
     st.add_argument("--compositor", default="Hyprland",
                     help="hayatta kaldığı denetlenecek süreç")
     st.add_argument("--poller", default="waybar",

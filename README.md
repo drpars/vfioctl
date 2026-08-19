@@ -292,8 +292,11 @@ düzeltmenin işe yaradığı ancak öyle bir süreç canlıyken ölçülebilir.
 yoklayıcı durmuşsa **koşmayı reddeder**. `--no-poller` sessiz taban çizgisi
 içindir, kabul turu değildir.
 
-> `--domain`'in öntanımlı değeri hâlâ `win11`'dir; başka bir ad kullanıyorsanız
-> her çağrıda vermeniz gerekir.
+> **`--domain` zorunludur, öntanımlı değeri yoktur.** Verilmezse komut hiçbir
+> şey yapmadan çıkar (rc 2), tanımlı domain'leri listeler ve eksik bayrağı
+> eklenmiş çağrıyı basar. Eskiden `win11`'e öntanımlıydı; bu makinenin misafiri
+> `win11-nvme` olunca eski ad çözünmeye devam etti, yani argümansız çağrı hata
+> vermeden **başka bir misafirde** koşup sonucu kabul ölçütü diye raporlardı.
 
 ### Günlük kullanım
 

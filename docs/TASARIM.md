@@ -219,6 +219,17 @@ her turda onun cpu deltasını basar — sıfır delta turu "sonuç geçersiz" y
 **Günlük `$XDG_STATE_HOME/vfioctl/selftest.log`'a yazılır, `/tmp`'ye değil:**
 kurtarması reboot olan arıza, günlüğü de siliyordu — ve bir kez gerçekten sildi.
 
+**`--domain`'in öntanımlı değeri yoktur, ve asimetri kasıtlıdır.** `--rounds`,
+`--compositor`, `--poller` **nasıl** test edileceğini söyler; öntanımlıdırlar.
+`--domain` **neyi** söyler — hedefi araç kendi seçerse, okuyucunun ölçüldüğünü
+sandığından başka bir şeyi ölçmüş olabilir. Öntanımlı `win11` idi; makinenin
+misafiri `win11-nvme` olunca eski ad **çözünmeye devam etti**, yani argümansız
+çağrı hata vermeden beş turu başka bir misafirde koşar ve sonucu kabul ölçütü
+diye raporlardı — çıktının hiçbir yerinde hangisi olduğu yazmadan. Kaynağa
+yazılmış ad, yalnızca yazıldığı makineyi korur. O yüzden eksik `--domain` bir
+**rettir** (rc 2): tanımlı domain'ler listelenir ve eksik bayrağı eklenmiş çağrı
+basılır. Kural, eksik tty'ninkiyle aynı: **cevaplanmamış soru "evet" değildir.**
+
 **Ad `selftest`, `handover` değil** — komut kartı hiç ellemiyor, fiilî devri
 hook yapıyor. "handover" adı bir gün gerçekten devreden bir kip ima eder, ve
 ikinci bir yazar tam olarak makineyi üç kez kilitleyen şeydi.
