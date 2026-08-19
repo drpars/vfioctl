@@ -18,8 +18,13 @@
   qcow2 disk or a handed-over NVMe controller. The mode-2 shape rests on one
   measurement and one gap, and both are written down where they are used: a
   <boot order> inside <hostdev managed='yes'> is accepted by libvirt and
-  survives read-back (measured 2026-08-19, libvirt 12.6.0), while whether OVMF
-  can actually boot the guest off that controller HAS NOT BEEN MEASURED.
+  survives read-back (measured 2026-08-19, libvirt 12.6.0), and OVMF enumerates
+  the handed-over namespace as a boot candidate rather than merely seeing the
+  controller (measured 2026-08-19: the boot manager lists it by model and
+  controller serial, with no ESP on the drive, while Setup sees exactly one
+  disk, Disk 0). WHAT IS STILL UNMEASURED IS THE INSTALL ITSELF: no Windows has
+  ever been written to a handed-over controller from here, so mode 2 is a path
+  whose ends are measured and whose middle is not.
 
   WHAT IS DELIBERATELY MISSING, AND WHY. This domain does not passthrough the
   dGPU. The question this round answers is "does autounattend.xml produce a

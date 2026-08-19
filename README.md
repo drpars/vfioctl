@@ -422,9 +422,12 @@ reddedilir: bir domain'in bir sistem diski olur, ve `clean`'in iki hedefi olmaz.
 `<hostdev managed='yes'>` içinde kabul ediyor ve geri okumada aynı yerde
 duruyor; domain'in `<metadata>`'sı devredilen denetleyicinin kimliğini
 (`model`, `serial`, `ids`) `role="system"` ile birlikte aynen koruyor.
-**Ölçülmeyen: OVMF'in o denetleyiciden gerçekten önyükleyebildiği, ve Windows
-Setup'ın diski `list disk`'te kaçıncı sırada gördüğü.** İkisi de gerçek bir boot
-istiyor ve o tur koşulmadı — bu kip bugün **sınanmamış** bir yoldur.
+**2026-08-19'da gerçek bir boot ile ölçülenler** (kurulum yapılmadan, ayrı bir
+sonda domain'iyle): OVMF namespace'i **önyükleme adayı olarak listeliyor**
+(`UEFI <model> <seri> 1`, üstünde ESP olmadığı hâlde), ve Windows Setup'ın
+gördüğü **tek** disk `Disk 0` — yani cevap dosyasının hedefi devredilen
+denetleyicidir. **Hâlâ ölçülmeyen: kurulumun kendisi** — bu yoldan bir
+denetleyiciye Windows kurulup oradan açılmadı.
 
 **Kurulum diski siler, ve son kapı insandır.** Cevap dosyası `DiskID 0`'ı baştan
 bölümlüyor. Envanterin `✓`'i *"host onun üstünde durmuyor"* demektir, **"boş"
@@ -520,8 +523,9 @@ Faz 4'ün iki yarısı birbirinin küçük kardeşi değil, ayrı iki mekanizma.
 misafir kapanınca geri alınır. **Disk devri** ise kalıcı tanıma ait ve K14'ün sert
 korumasının muhatabı o; misafir denetleyiciyi boş bir disk olarak görür.
 Reddetme yolu envanterde yazılı ve ölçülü. Sistem diskini fiziksel NVMe yapan
-kurulum kipi (`build --system-nvme`) yazıldı; **gerçek bir boot ile
-ölçülmedi** → "İki kurulum kipi".
+kurulum kipi (`build --system-nvme`) yazıldı; firmware ve Setup yakası
+2026-08-19'da gerçek bir boot ile ölçüldü, **kurulumun kendisi hâlâ
+koşulmadı** → "İki kurulum kipi".
 
 Faz 3'ün kabul ölçütü bu makinede karşılandı: kartsız prova ve kartlı tur geçti
 (LG host günlüğü kartı adıyla yazıp `Capture Start` dedi, VDD ekranı 2560x1440),

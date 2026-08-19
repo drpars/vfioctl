@@ -1234,9 +1234,11 @@ slot='0x{slot:02x}' function='0x{function:x}'/>
 
 # Mode 2's one extra line. MEASURED, not assumed: libvirt 12.6.0 accepts a
 # <boot order> inside <hostdev managed='yes'> and hands it back in the same
-# place on dumpxml (2026-08-19, on a throwaway domain). What that measurement
-# does NOT say is that OVMF can boot a guest off the controller -- that is a
-# separate round with a real boot in it, and it has not been run.
+# place on dumpxml (2026-08-19, on a throwaway domain). The round that measures
+# what the entry is FOR has since been run (2026-08-19, no install): with the
+# CD's boot entry removed the firmware lists the namespace itself as a boot
+# candidate, by model and controller serial, on a drive carrying no ESP. What
+# is still unmeasured is an install completing onto it and booting afterwards.
 NVME_BOOT_XML = "      <boot order='2'/>\n"
 
 # The qcow2 half of the same slot. It is the block that used to sit in the
@@ -3081,9 +3083,12 @@ def guard_one_disk(name: str, address: str) -> None:
     <disk> or a second NVMe controller turns DiskID 0 into a coin toss with a
     real drive on each side.
 
-    WHICH DISK DiskID 0 ACTUALLY IS remains unmeasured -- that needs a real
-    boot, and this tool has not had one on this path. What the check buys is
-    that the question has exactly one possible answer.
+    WHICH DISK DiskID 0 ACTUALLY IS was measured on 2026-08-19, on a probe
+    domain shaped like this one but with no answer file in it: Setup's `list
+    disk` showed one line, Disk 0, and `detail disk` named the handed-over
+    controller. So the check's guarantee -- that the question has exactly one
+    possible answer -- was confirmed against a running Setup rather than
+    inferred; what it still does not cover is an install completing on it.
     """
     images, controllers = guest_disks(name)
     if images or controllers != [address]:
