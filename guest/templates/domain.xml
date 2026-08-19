@@ -14,8 +14,25 @@
       generates them. Hand-written addresses are a conflict waiting for the day
       a <hostdev> gets added.
 
-  ONE TEMPLATE, TWO SYSTEM DISKS. @@SYSTEM@@ below is filled with either a
-  qcow2 disk or a handed-over NVMe controller. The mode-2 shape rests on one
+  ONE TEMPLATE, THREE ROUNDS. The SYSTEM slot below is filled with either a
+  qcow2 disk or a handed-over NVMe controller, and the MEDIA slot with the
+  install discs or with nothing at all. The third round is the adopting one: it
+  hands the domain a controller that already carries a system, attaches no
+  media, and is never started from here — so no Setup runs and no answer file
+  can wipe anything.
+
+  TWO THINGS THIS COMMENT MAY NOT CONTAIN, and both were measured the hard way
+  on 2026-08-19. A double hyphen: illegal inside an XML comment, and one here
+  makes Setup ignore the answer file with no error anywhere — which is why the
+  flag names in this file are spelled out in words and build.py's header is
+  where they appear as flags. And a spelled-out placeholder: the renderer is a
+  plain text substitution and does not know a comment from an element, so a
+  slot named in full here gets filled here too, with a copy of whatever the
+  round put in it. That was harmless while both fillings were bare elements —
+  libvirt drops comments on define — and stopped being harmless the moment one
+  of them carried a comment of its own, which the media block does.
+
+  The mode-2 shape rests on one
   measurement and one gap, and both are written down where they are used: a
   <boot order> inside <hostdev managed='yes'> is accepted by libvirt and
   survives read-back (measured 2026-08-19, libvirt 12.6.0), and OVMF enumerates
@@ -140,32 +157,14 @@
          than trusting this comment. -->
 @@SYSTEM@@
 
-    <!-- Boot order 1. The firmware's "Press any key to boot from CD" window is
-         what guest/build.py spends its first seconds answering; after that
-         window closes on later reboots, the prompt times out and the disk wins. -->
-    <disk type='file' device='cdrom'>
-      <driver name='qemu' type='raw'/>
-      <source file='@@WINISO@@'/>
-      <target dev='sda' bus='sata'/>
-      <readonly/>
-      <boot order='1'/>
-    </disk>
-
-    <disk type='file' device='cdrom'>
-      <driver name='qemu' type='raw'/>
-      <source file='@@VIRTIOISO@@'/>
-      <target dev='sdb' bus='sata'/>
-      <readonly/>
-    </disk>
-
-    <!-- The helper ISO. Setup finds autounattend.xml by scanning drive roots,
-         so this needs no boot entry and no known drive letter. -->
-    <disk type='file' device='cdrom'>
-      <driver name='qemu' type='raw'/>
-      <source file='@@UNATTENDISO@@'/>
-      <target dev='sdc' bus='sata'/>
-      <readonly/>
-    </disk>
+    <!-- THE INSTALL MEDIA, AND WHY THEY ARE A PLACEHOLDER TOO. An installing
+         round fills this with three CD-ROMs; an adopting round fills it with
+         nothing. The blocks moved into build.py, next to the two system-disk
+         blocks, because a template that always carries three <source> paths
+         cannot express the round that attaches none of them — and the
+         answer-file disc is precisely the medium an adopting round must never
+         have. -->
+@@MEDIA@@
 
     <controller type='usb' index='0' model='qemu-xhci' ports='15'/>
     <controller type='virtio-serial' index='0'/>

@@ -63,7 +63,10 @@ Bunun bir vaat değil bir **kapı** olması tasarımın parçası:
   Host'un hiçbir şeyini hareket ettirmeyen `build --disk` de sormaz; sınıf dışı
   makinede koşar, yalnızca Looking Glass'ı olmaz. Sorusunun daha sert sahibi
   olan yollar (`guest nvme --attach`, `guest usb`) `inventory`'nin hükmüne
-  cevap verir.
+  cevap verir. **`build --adopt` de bu son kümede:** diske yazmaz, yalnız var
+  olan bir sistemin etrafına domain tanımlar — `nvme --attach`'in yazdığı satırı
+  artı bir boot girdisi. Ek fren, geri alınamayan yol için alındı; sahiplenme
+  turunu `clean` bütünüyle geri alır.
 
 Kapsam dışı: tek GPU'lu makineler (host ekranını kaybeden **başka** bir
 tasarım), AMD dGPU'ların reset bug'ı.
@@ -387,6 +390,7 @@ arda beş kez.
 ./vfioctl guest setup          # (kart varsa NVIDIA) → VDD → Looking Glass → tek ekran
 ./vfioctl guest passthrough    # domain'e kartı ver (geri almak: --off)
 ./vfioctl guest nvme --attach 0000:02:00.0   # domain'e NVMe denetleyicisi ver
+./vfioctl guest build --adopt --system-nvme 0000:02:00.0   # kurulu diski sahiplen
 ./vfioctl guest eject          # biten kurulum ortamını sürücüden çıkar
 ./vfioctl guest setup --start  # domain'i başlat + turu koş (kartlıysa: düz VT)
 ./vfioctl guest status
@@ -450,6 +454,46 @@ onu **mutlak** reddeder ve bunun bayrağı yoktur: izin verilseydi geriye
 açılmayan bir domain ve hiçbir komutun geri koyamayacağı bir disk kalırdı, çünkü
 boot sırasını yalnız `build --system-nvme` yazar ve o da diski baştan bölümlüyor.
 Çıkış yolu `clean`'dir — diski içeriğine dokunmadan serbest bırakır.
+
+#### Üçüncü tur: `--adopt` — kurulu bir diski sahiplenmek
+
+```sh
+./vfioctl guest --name win11-b build --adopt --system-nvme 0000:02:00.0
+```
+
+`clean` diski silmediği için ortaya bir nesne çıkıyor: **üstünde çalışan bir
+Windows olan, domain'i olmayan fiziksel disk.** Onu geri alacak yarı iki komuta
+bölünmüştü ve ikisinde de eksikti — `build` yalnız silerek kuruyor,
+`nvme --attach` boot sırasını yazmıyor. `--adopt` o eksik yarı: domain'i diskin
+etrafında tanımlar, **kurmaz**.
+
+**Fiil değil bayrak, ve gerekçesi ölçülü değil yapısal:** domain tanımlayan
+ikinci bir kod yolu ikinci bir cevap olurdu ve ayrışan taraf, bir domain'i
+yanlış tanımlayana kadar kimsenin okumadığı taraf olur. Böylece şablon,
+`<metadata>` kaydı (`role="system"`), K14 kapısı ve `guard()` olduğu gibi
+kullanılır. `--adopt` yalnız `--system-nvme` ile geçerlidir: kip 1'de `clean`
+qcow2'yi zaten siliyor, geriye sahiplenilecek bir şey kalmıyor.
+
+**Silme yolu atlanmıyor, erişilemez oluyor** — bayrağın bağlayıcı tasarım
+ölçütü buydu. Sahiplenme turu cevap dosyasını **üretmiyor**, yardımcı ISO'yu
+**kurmuyor**, domain'e **hiçbir ortam takmıyor** (şablonun ortam yuvası boş
+doluyor), sonra **tanımı geri okuyup** yüklü tek bir CD-ROM'da bile turu
+reddediyor, ve misafiri **hiç başlatmıyor**. Koşula bağlı olarak atlanan bir
+silme, koşulun yanlış hesaplandığı gün gerçekleşen bir silmedir.
+
+**Önyüklenebilirlik sınanmaz.** Ölçmek diskin içeriğini okumayı gerektirir,
+oysa bu araç hiçbir yerde okumaz — `inventory`'nin `✓`'i "boş" demediği gibi bu
+bayrağın sessizliği de "açılır" demez. Tur domain'i tanımlar ve bunu söyler;
+cevabı ilk başlatma verir ve o komut kullanıcınındır.
+
+**Bu tur `EVET` sormaz, çünkü silecek bir şeyi yok** — ama `--confirm-wipe` ile
+birlikte verilirse **reddeder**: silme onayı, silmeyen bir turda sessizce kabul
+edilmez. `--setup` de reddedilir; bu tur misafiri başlatmıyor, `setup --start`
+onun komutu. Ölçüldü (2026-08-19, `adopt-probe` sonda domain'i): tanımda
+`<disk>` hiç yok, `<hostdev>` `<boot order='1'/>` taşıyor ve geri okumada
+duruyor, `<metadata>` kimliği `role="system"` ile yazıyor, çalışma dizini
+oluşmuyor; `nvme --detach` diski mutlak reddediyor, `clean` domain'i kaldırıp
+diski kimliğiyle raporluyor ve denetleyici `nvme` sürücüsünde kalıyor.
 
 `setup`, `guest/windows/` altındaki betikleri misafire iter ve sırayla koşar.
 Sıra bir bağımlılık: ekran topolojisinin yalıtacak bir şeyi olması için önce
@@ -525,7 +569,8 @@ korumasının muhatabı o; misafir denetleyiciyi boş bir disk olarak görür.
 Reddetme yolu envanterde yazılı ve ölçülü. Sistem diskini fiziksel NVMe yapan
 kurulum kipi (`build --system-nvme`) yazıldı; firmware ve Setup yakası
 2026-08-19'da gerçek bir boot ile ölçüldü, **kurulumun kendisi hâlâ
-koşulmadı** → "İki kurulum kipi".
+koşulmadı** → "İki kurulum kipi". Aynı kipin geri yönü de yazıldı: `--adopt`
+kurulu bir diski sahiplenir ve diske hiç yazmaz → "Üçüncü tur".
 
 Faz 3'ün kabul ölçütü bu makinede karşılandı: kartsız prova ve kartlı tur geçti
 (LG host günlüğü kartı adıyla yazıp `Capture Start` dedi, VDD ekranı 2560x1440),

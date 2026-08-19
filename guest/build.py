@@ -2,6 +2,7 @@
 
     ./vfioctl guest build            # the whole round, ~7-10 min, unattended
     ./vfioctl guest build --system-nvme 0000:02:00.0   # ... onto a real drive
+    ./vfioctl guest build --adopt --system-nvme 0000:02:00.0   # ... around one
     ./vfioctl guest setup            # push and drive the guest-side scripts
     ./vfioctl guest passthrough      # give the domain the dGPU (or --off)
     ./vfioctl guest nvme             # give the domain a whole NVMe controller
@@ -97,6 +98,31 @@ nothing at all stays ours to clean, because a stranger's device cannot be the
 one that is missing. Only the state where both signs fail and something live
 and non-storage sits there is refused, and the refusal names `virsh edit`,
 which is the same repair either way round.
+
+THE THIRD ROUND DEFINES AND STOPS: `build --adopt --system-nvme <pci>`. Once
+`clean` stopped deleting drives there was a thing no command could name -- a
+physical disk still carrying a working Windows, with no domain left around it.
+`build` could only install by wiping, and `nvme --attach` writes no boot entry,
+so the two halves the case needs were in different commands and neither had the
+other's. --adopt is that missing half. It is a flag and not a verb because a
+second code path that defines a domain is a second answer, and the one that
+drifts is the one nobody reads until the day it defines a domain wrongly; this
+way the template, the <metadata> record, K14's gate and guard() are the same
+ones the installing round goes through.
+
+WHAT MAKES THE WIPE UNREACHABLE RATHER THAN SKIPPED, which was the binding
+criterion this flag was designed against. An adopting round renders no answer
+file, builds no helper ISO and fills @@MEDIA@@ with nothing, so there is no
+disc to boot and none for a scanning Setup to find; it then reads the
+definition back and refuses on any loaded CD-ROM at all; and it never starts
+the guest. A round that merely skipped the wipe would be one wrong condition
+away from performing it, and the condition would be wrong on somebody's data.
+
+BOOTABILITY IS NOT TESTED, which is the limit inventory already keeps. Asking
+whether the drive boots means reading its content, and nothing in this tool
+reads disk content -- inventory's "✓" has never meant "empty", and this flag's
+silence has never meant "bootable". The round defines the domain and says so;
+the firmware answers the rest on a first start that is the user's own command.
 
 NOTHING PERSONAL REACHES THE REPOSITORY. The account name, the password, the
 locale and the ISO path are asked at run time or passed as flags; the rendered
@@ -1239,7 +1265,12 @@ slot='0x{slot:02x}' function='0x{function:x}'/>
 # CD's boot entry removed the firmware lists the namespace itself as a boot
 # candidate, by model and controller serial, on a drive carrying no ESP. What
 # is still unmeasured is an install completing onto it and booting afterwards.
-NVME_BOOT_XML = "      <boot order='2'/>\n"
+#
+# THE NUMBER IS AN ARGUMENT BECAUSE THE ROUNDS DISAGREE ABOUT WHAT IS FIRST.
+# An installing round boots the CD and leaves the drive second. An adopting one
+# attaches no CD, so the drive is the only bootable thing in the domain, and a
+# gap at order 1 would be a reference to a disc that is not there.
+NVME_BOOT_XML = "      <boot order='{order}'/>\n"
 
 # The qcow2 half of the same slot. It is the block that used to sit in the
 # template verbatim; it moved here when the template gained @@SYSTEM@@, so that
@@ -1253,11 +1284,46 @@ SYSTEM_DISK_XML = """    <disk type='file' device='disk'>
     </disk>
 """
 
+# The install discs, and the third thing that differs between rounds. They sat
+# in the template verbatim until --adopt arrived: a template carrying three
+# <source> paths cannot express a round that attaches none of them, and the
+# helper ISO is precisely the medium an adopting round must never have. Same
+# move SYSTEM_DISK_XML made when the template gained @@SYSTEM@@ -- what differs
+# between the rounds lives here, side by side; what is identical stays there.
+INSTALL_MEDIA_XML = """    <!-- Boot order 1. The firmware's "Press any key to boot from CD" window is
+         what guest/build.py spends its first seconds answering; after that
+         window closes on later reboots, the prompt times out and the disk wins. -->
+    <disk type='file' device='cdrom'>
+      <driver name='qemu' type='raw'/>
+      <source file='{winiso}'/>
+      <target dev='sda' bus='sata'/>
+      <readonly/>
+      <boot order='1'/>
+    </disk>
 
-def nvme_hostdev_xml(address: str, *, bootable: bool = False) -> str:
-    """The <hostdev> for one controller; bootable only in mode 2."""
-    return NVME_HOSTDEV_XML.format(boot=NVME_BOOT_XML if bootable else "",
-                                   **address_parts(address))
+    <disk type='file' device='cdrom'>
+      <driver name='qemu' type='raw'/>
+      <source file='{virtioiso}'/>
+      <target dev='sdb' bus='sata'/>
+      <readonly/>
+    </disk>
+
+    <!-- The helper ISO. Setup finds autounattend.xml by scanning drive roots,
+         so this needs no boot entry and no known drive letter. -->
+    <disk type='file' device='cdrom'>
+      <driver name='qemu' type='raw'/>
+      <source file='{unattendiso}'/>
+      <target dev='sdc' bus='sata'/>
+      <readonly/>
+    </disk>
+"""
+
+
+def nvme_hostdev_xml(address: str, *, boot_order: int | None = None) -> str:
+    """The <hostdev> for one controller; a boot entry only when it is the system disk."""
+    return NVME_HOSTDEV_XML.format(
+        boot=NVME_BOOT_XML.format(order=boot_order) if boot_order else "",
+        **address_parts(address))
 
 
 def nvme_item(address: str):
@@ -3073,7 +3139,7 @@ def guest_setup(a, name: str) -> int:
 # subcommands
 # --------------------------------------------------------------------------- #
 
-def guard_one_disk(name: str, address: str) -> None:
+def guard_one_disk(name: str, address: str, *, wipes: bool = True) -> None:
     """Read the defined domain back: a mode-2 guest must see exactly one disk.
 
     THE ANSWER FILE WIPES DiskID 0 AND INSTALLS TO IT. In mode 1 that single
@@ -3089,19 +3155,68 @@ def guard_one_disk(name: str, address: str) -> None:
     controller. So the check's guarantee -- that the question has exactly one
     possible answer -- was confirmed against a running Setup rather than
     inferred; what it still does not cover is an install completing on it.
+
+    AN ADOPTING ROUND READS IT BACK FOR A DIFFERENT CONSEQUENCE. There is no
+    answer file in that round, so there is no DiskID to get wrong; what a
+    second disk breaks there is the record. The <metadata> note names one
+    controller role="system", `nvme --detach` refuses on the strength of it,
+    and every start checks that address still carries that serial -- a domain
+    holding a disk nobody recorded makes all three sentences narrower than they
+    read, and the narrowing is invisible from the record's side.
     """
     images, controllers = guest_disks(name)
     if images or controllers != [address]:
+        cost = ("Cevap dosyası DiskID 0'ı baştan bölümlüyor, o yüzden tur "
+                "başlatılmıyor." if wipes else
+                "Kimlik kaydı tek denetleyiciyi sistem diski diye "
+                "adlandırıyor; kayıtsız ikinci bir disk o kaydı eksik "
+                "bırakır.")
         die(f"'{name}' kip 2 için beklendiği gibi tanımlanmadı -- misafirin "
             f"göreceği diskler: imaj {images or '(yok)'}, denetleyici "
-            f"{controllers or '(yok)'}; beklenen yalnız {address}. Cevap "
-            f"dosyası DiskID 0'ı baştan bölümlüyor, o yüzden tur "
-            f"başlatılmıyor. Domain tanımlı kaldı: "
+            f"{controllers or '(yok)'}; beklenen yalnız {address}. {cost} "
+            f"Domain tanımlı kaldı: "
             f"{self_cmd('guest', '--name', name, 'clean')}")
 
 
-def system_nvme_target(a, address: str):
+def guard_no_install_media(name: str) -> None:
+    """Read the defined domain back: an adopting round arms no Setup.
+
+    THIS IS THE BARRIER THAT READS RATHER THAN DECIDES. Everything else keeping
+    --adopt away from the drive is a decision taken earlier in the same
+    function -- no answer file rendered, no helper ISO built, the media
+    placeholder filled with nothing -- and a decision is exactly what a later
+    edit inverts without noticing. The criterion this flag was designed against
+    is that the wipe be unreachable and not merely skipped, so the definition
+    is asked what it actually carries, the way guard_one_disk asks about disks.
+
+    ANY MEDIUM IS REFUSED, not only the answer file. A Windows disc on its own
+    boots a Setup for a person to drive, which is not destructive by itself --
+    but it is also not something this round attached, so its presence means the
+    define did not produce what was asked for. The answer file is what that
+    state costs on the day the guess about which medium it is turns out wrong.
+    """
+    xml = virsh("dumpxml", name).stdout
+    media = cdrom_media(xml)
+    if not media:
+        return
+    answers = answer_file_isos(xml)
+    armed = (f" Bunlardan {', '.join(answers)} CEVAP DOSYASI taşıyor: Setup "
+             f"koşarsa DiskID 0'ı WillWipeDisk ile siler." if answers else "")
+    die(f"'{name}' sahiplenme turundan CD-ROM ortamıyla çıktı: "
+        f"{', '.join(path for _, path, _, _ in media)}.{armed} Bu tur hiçbir "
+        f"ortam takmaz, yani tanım istenen tanım değil ve misafir "
+        f"başlatılmıyor. Domain tanımlı kaldı, diske yazılmadı; kaldırmak: "
+        f"{self_cmd('guest', '--name', name, 'clean')}")
+
+
+def system_nvme_target(a, address: str, *, wipes: bool):
     """K14's gate, the identity that gets recorded, and the one human check.
+
+    `wipes` IS WHAT SEPARATES THE TWO ROUNDS THAT REACH THIS DRIVE, and only
+    the parts that guard the wipe hang off it. What both rounds ask is the same
+    and asked unconditionally: K14's flagless refusal, because handing the host
+    its own mounted disk is wrong either way round, and a readable serial,
+    because the identity record is what protects the drive afterwards in both.
 
     THE CONFIRMATION IS NOT CEREMONY, AND THE GATE ABOVE IT IS EXACTLY WHY IT
     IS STILL NEEDED. core.inventory refuses a controller the host is standing
@@ -3123,8 +3238,8 @@ def system_nvme_target(a, address: str):
     controller is on vfio-pci, which is the honest answer to "some other guest
     has it right now".
     """
-    # THE GATE, AND WHY MODE 2 ASKS IT WHILE MODE 1 DOES NOT. This was read as
-    # an omission in mode 1 for a while; it is a decision, made 2026-08-19 and
+    # THE GATE, AND WHY ONLY THE WIPING ROUND ASKS IT. This was read as an
+    # omission in mode 1 for a while; it is a decision, made 2026-08-19 and
     # written up in CLAUDE.md. What the gate owns is "is this machine the class
     # this tool claims, and can it hand its card over", and mode 1's answer
     # does not depend on that: it builds an image and a CARDLESS domain, and
@@ -3137,10 +3252,21 @@ def system_nvme_target(a, address: str):
     # They say nothing about partitioning a drive -- inventory's K14 refusal is
     # what answers that. This is a second, unrelated brake, taken deliberately
     # because this is the one path whose damage has no undo.
-    open_gate, _, _ = _core_doctor().gate(getattr(a, "profile", None))
-    if not open_gate:
-        die(f"Kapı kapalı -- bu makinede fiziksel bir diske kurulum yapılmaz. "
-            f"Teşhis: {self_cmd('doctor')}. (qcow2'ye kuran kip 1 etkilenmez.)")
+    #
+    # AND AN ADOPTING ROUND IS NOT THAT PATH, so it does not ask either. The
+    # brake was taken because a wipe has no undo; adopting writes one XML file
+    # and nothing else, which `clean` takes back whole while reporting the
+    # drive untouched. What it writes is the line `nvme --attach` already
+    # writes without asking the gate, plus a boot entry -- and that command's
+    # exemption is the one named in CLAUDE.md: its question has a narrower and
+    # harder owner in core.inventory. Two commands writing the same line and
+    # answering to different gates is how the pair drifts.
+    if wipes:
+        open_gate, _, _ = _core_doctor().gate(getattr(a, "profile", None))
+        if not open_gate:
+            die(f"Kapı kapalı -- bu makinede fiziksel bir diske kurulum "
+                f"yapılmaz. Teşhis: {self_cmd('doctor')}. (qcow2'ye kuran "
+                f"kip 1 ile diske yazmayan --adopt etkilenmez.)")
 
     item = nvme_candidate(address)
 
@@ -3156,11 +3282,21 @@ def system_nvme_target(a, address: str):
 
     say(f"sistem diski olacak: {ident.model} {ident.serial} ({ident.ids}) "
         f"@ {address}")
+    if not wipes:
+        say("  BU TUR O DİSKE YAZMAZ: kurulum ortamı takılmaz, cevap dosyası "
+            "üretilmez, misafir başlatılmaz -- diskin içeriği olduğu gibi "
+            "kalır.")
+        say(f"  üstünde açılabilir bir sistem olup olmadığı SINANMAZ: onu "
+            f"ölçmek diskin içeriğini okumak demek ve {self_cmd('inventory')} "
+            f"gibi bu tur da hiç okumaz. Cevabı ilk başlatma verir.")
+        return ident
     say("  BU TUR O DİSKE KURAR: cevap dosyası DiskID 0'ı baştan bölümlüyor, "
         "üstünde ne varsa gider.")
     say(f"  envanterin `✓`'i \"host onun üstünde durmuyor\" demektir, "
         f"\"boş\" demek değil -- {self_cmd('inventory')} diskin içeriğini "
         f"hiç okumaz.")
+    say(f"  üstünde zaten kurulu bir sistem varsa aranan bayrak bu değil: "
+        f"--adopt domain'i onun etrafında tanımlar ve diske yazmaz.")
 
     if getattr(a, "confirm_wipe", False):
         return ident
@@ -3180,6 +3316,11 @@ def cmd_build(a):
     # two candidates and no way to tell which one the guest boots from -- and
     # the answer file, which wipes DiskID 0, with two drives to choose between.
     system_nvme = (a.system_nvme or "").lower()
+    # ADOPTING IS A MODE OF THIS ROUND AND NOT A SECOND ONE, and it is read
+    # into one name here. The alternative is each of the half-dozen places
+    # below deciding for itself whether an install is happening, which is the
+    # shape that ends with two of them disagreeing over a physical drive.
+    adopt = bool(a.adopt)
     if system_nvme:
         if a.disk:
             die("--system-nvme ile --disk birlikte verilmez: ikisi de sistem "
@@ -3189,79 +3330,146 @@ def cmd_build(a):
                 "üretmiyor, var olan bir denetleyiciyi devrediyor. Boyutu "
                 "diskin kendisi söyler, bölümlemeyi misafirin kurulumu yapar.")
         address_parts(system_nvme)   # refuses a malformed address before anything
+    elif adopt:
+        # THE SCOPE IS MODE 2's, AND THE REASON IS WHAT `clean` DOES. In mode 1
+        # it deletes the qcow2, so that mode leaves nothing behind to adopt.
+        # The object this flag exists for -- a drive still carrying a system
+        # after its domain was removed -- is created by mode 2 alone, because
+        # that is the mode whose `clean` reports the drive and refuses to touch
+        # it.
+        die("--adopt yalnız --system-nvme ile kullanılır: üstünde sistem olan "
+            "fiziksel bir diski sahiplenir. qcow2 tarafında karşılığı yok -- "
+            f"{self_cmd('guest', '--name', a.name, 'clean')} imajı zaten "
+            f"siliyor, geriye sahiplenilecek bir disk kalmıyor.")
+
+    if adopt:
+        # REFUSED RATHER THAN IGNORED, and each refusal names a consent or a
+        # step that would otherwise mean nothing here without saying so.
+        # --confirm-wipe is typed by somebody who believes this round wipes,
+        # and the lesson that it must not be quietly re-read by a round it was
+        # not typed for is the one that split it off from --yes in the first
+        # place. --setup drives a guest this round never starts.
+        if a.confirm_wipe:
+            die("--adopt ile --confirm-wipe birlikte verilmez: bu tur diske "
+                "yazmıyor, yani onaylanacak bir silme de yok. Silerek kuran "
+                "tur --adopt'suz olandır.")
+        if a.setup:
+            die("--adopt ile --setup birlikte verilmez: bu tur domain'i "
+                "tanımlayıp duruyor, misafiri başlatmıyor. Kurulu sistem "
+                "açıldıktan sonra: "
+                f"{self_cmd('guest', '--name', a.name, 'setup', '--start')}")
+        say("--adopt: kurulum YAPILMAYACAK -- cevap dosyası üretilmez, "
+            "kurulum ortamı takılmaz, hesap açılmaz, misafir başlatılmaz. "
+            "Kuruluma ait bayraklar (--user, --locale, --win-iso …) bu turda "
+            "karşılıksızdır.")
 
     disk = None if system_nvme else Path(a.disk or DEFAULT_DISK)
     guard(a.name, disk)
 
-    # qemu-img is mode 1's tool: mode 2 creates no image.
-    for tool in (("xorriso", "virsh") if system_nvme
+    # qemu-img is mode 1's tool: mode 2 creates no image. xorriso builds the
+    # answer-file ISO, which an adopting round does not have one of.
+    for tool in (("virsh",) if adopt else
+                 ("xorriso", "virsh") if system_nvme
                  else ("xorriso", "qemu-img", "virsh")):
         if not shutil.which(tool):
             die(f"'{tool}' bulunamadı")
 
     win_iso = Path(a.win_iso)
     virtio_iso = Path(a.virtio_iso)
-    for iso in (win_iso, virtio_iso):
-        if not iso.is_file():
-            die(f"ISO yok: {iso}")
+    if not adopt:
+        for iso in (win_iso, virtio_iso):
+            if not iso.is_file():
+                die(f"ISO yok: {iso}")
 
     # Before the password prompt, not after: the round's irreversible half is
     # the drive, and a question asked after somebody has typed a password is a
     # question asked of somebody already committed.
     if system_nvme:
         guard_nvme_free(system_nvme, a.name)
-    ident = system_nvme_target(a, system_nvme) if system_nvme else None
+    ident = (system_nvme_target(a, system_nvme, wipes=not adopt)
+             if system_nvme else None)
 
     # Credentials are collected before anything is destroyed, and not only to
     # fail fast: --force wipes the work directory, which is a perfectly sensible
-    # place for --password-file to live.
-    user = a.user or input("misafir kullanıcı adı: ").strip()
-    if not user:
-        die("kullanıcı adı boş olamaz")
-    # --password-file exists because --password would put the password in the
-    # process table for anyone running ps, and an unattended round is exactly
-    # when nobody is at the prompt to type it.
-    if a.password_file:
-        password = Path(a.password_file).read_text(encoding="utf-8").strip()
-    else:
-        password = a.password or getpass.getpass("misafir parolası: ")
-    if not password:
-        die("parola boş olamaz")
+    # place for --password-file to live. An adopting round asks for none of it:
+    # the system on the drive brought its own accounts, and inventing one here
+    # would be a claim about a guest this tool has never booted.
+    user = password = ""
+    if not adopt:
+        user = a.user or input("misafir kullanıcı adı: ").strip()
+        if not user:
+            die("kullanıcı adı boş olamaz")
+        # --password-file exists because --password would put the password in
+        # the process table for anyone running ps, and an unattended round is
+        # exactly when nobody is at the prompt to type it.
+        if a.password_file:
+            password = Path(a.password_file).read_text(encoding="utf-8").strip()
+        else:
+            password = a.password or getpass.getpass("misafir parolası: ")
+        if not password:
+            die("parola boş olamaz")
 
     if domain_exists(a.name):
         if not a.force:
-            die(f"'{a.name}' zaten tanımlı. Önce: {self_cmd('guest', 'clean')}")
+            # --name, and not the bare subcommand: the flag defaults to
+            # win11-test, so a hint without it told the reader to clean a
+            # different guest -- the one destructive command in this file
+            # aimed at the wrong domain and its image.
+            die(f"'{a.name}' zaten tanımlı. Önce: "
+                f"{self_cmd('guest', '--name', a.name, 'clean')}")
         cmd_clean(a)
 
     workdir = IMAGES / f"{a.name}-unattend"
-    workdir.mkdir(parents=True, exist_ok=True)
-    workdir.chmod(0o700)
-    unattend_iso = workdir / "unattend.iso"
+    if adopt:
+        # 1-2. THE ANSWER FILE IS NOT SKIPPED HERE, IT IS NEVER RENDERED, and
+        #      neither is the ISO that would carry it. What a scanning Setup
+        #      could find is settled once, by there being nothing to find and
+        #      no drive to find it in.
+        rendered = None
+        media_block = ""
+    else:
+        workdir.mkdir(parents=True, exist_ok=True)
+        workdir.chmod(0o700)
+        unattend_iso = workdir / "unattend.iso"
 
-    # 1. autounattend.xml
-    xml = render(TEMPLATES / "autounattend.xml", {
-        "UILANG": a.locale,
-        "INPUTLOCALE": a.locale,
-        "SYSLOCALE": a.locale,
-        "USERLOCALE": a.locale,
-        "IMAGENAME": a.image_name,
-        "HOSTNAME": a.hostname or a.name.upper()[:15],
-        "TIMEZONE": a.timezone,
-        "USER": user,
-        "PASSWORD": xml_escape(password),
-    })
-    rendered = workdir / "autounattend.xml"
-    rendered.write_text(xml, encoding="utf-8")
-    rendered.chmod(0o600)
-    say(f"autounattend.xml üretildi: {rendered} (parola taşır, makine-yerel)")
+        # 1. autounattend.xml
+        xml = render(TEMPLATES / "autounattend.xml", {
+            "UILANG": a.locale,
+            "INPUTLOCALE": a.locale,
+            "SYSLOCALE": a.locale,
+            "USERLOCALE": a.locale,
+            "IMAGENAME": a.image_name,
+            "HOSTNAME": a.hostname or a.name.upper()[:15],
+            "TIMEZONE": a.timezone,
+            "USER": user,
+            "PASSWORD": xml_escape(password),
+        })
+        rendered = workdir / "autounattend.xml"
+        rendered.write_text(xml, encoding="utf-8")
+        rendered.chmod(0o600)
+        say(f"autounattend.xml üretildi: {rendered} (parola taşır, makine-yerel)")
 
-    # 2. helper ISO
-    build_unattend_iso(workdir, xml, unattend_iso)
+        # 2. helper ISO
+        build_unattend_iso(workdir, xml, unattend_iso)
+
+        # Escaped, because these land inside XML attributes and a Linux path
+        # may legally hold & or an apostrophe. Unescaped, the failure is
+        # render() dying with "üretilen XML geçersiz" and naming the template
+        # rather than the flag that carried the character -- after the qcow2
+        # has already been created. xml_escape() was written for the password
+        # and answers exactly the same question here.
+        media_block = INSTALL_MEDIA_XML.format(
+            winiso=xml_escape(str(win_iso)),
+            virtioiso=xml_escape(str(virtio_iso)),
+            unattendiso=xml_escape(str(unattend_iso)))
 
     # 3. the system disk. Mode 2 has nothing to create -- the drive exists,
     #    which is the point of the mode.
     if disk is None:
-        system_block = nvme_hostdev_xml(system_nvme, bootable=True)
+        # Boot order 1 belongs to the CD in an installing round; an adopting
+        # one has no CD, so the drive takes it.
+        system_block = nvme_hostdev_xml(system_nvme,
+                                        boot_order=1 if adopt else 2)
         say(f"sistem diski devrediliyor: {system_nvme} (imaj üretilmiyor)")
     else:
         disk.parent.mkdir(parents=True, exist_ok=True)
@@ -3281,15 +3489,7 @@ def cmd_build(a):
         "VCPU": a.vcpu,
         "CORES": a.vcpu // 2,
         "SYSTEM": system_block.rstrip("\n"),
-        # Escaped, because these land inside XML attributes and a Linux path
-        # may legally hold & or an apostrophe. Unescaped, the failure is
-        # render() dying with "üretilen XML geçersiz" and naming the template
-        # rather than the flag that carried the character -- after the qcow2
-        # has already been created. xml_escape() was written for the password
-        # and answers exactly the same question here.
-        "WINISO": xml_escape(str(win_iso)),
-        "VIRTIOISO": xml_escape(str(virtio_iso)),
-        "UNATTENDISO": xml_escape(str(unattend_iso)),
+        "MEDIA": media_block.rstrip("\n"),
     })
     redefine(dom_xml)
     say(f"domain tanımlandı: {a.name}")
@@ -3300,10 +3500,28 @@ def cmd_build(a):
         # edited around and written back out of an older copy -- i.e. silently
         # undone. The same measured order `nvme --attach` follows.
         record_nvme(a.name, ident, role=NVME_ROLE_SYSTEM)
-        guard_one_disk(a.name, system_nvme)
+        guard_one_disk(a.name, system_nvme, wipes=not adopt)
         say(f"  kimlik kaydı: {ident.model} {ident.serial} ({ident.ids}) "
             f"role={NVME_ROLE_SYSTEM} -- her başlatmadan önce adresin hâlâ "
             f"bunu taşıdığı doğrulanır")
+
+    if adopt:
+        # The round ends at a definition, and the last thing it does is read
+        # that definition rather than trust the branch above.
+        guard_no_install_media(a.name)
+        say(f"SAHİPLENİLDİ -- '{a.name}' {system_nvme} etrafında tanımlandı, "
+            f"kurulum yapılmadı.")
+        say("  diske yazılmadı: kurulum ortamı takılı değil, cevap dosyası "
+            "üretilmedi, misafir başlatılmadı.")
+        say("  açılıp açılmayacağı SINANMADI -- ilk başlatmayı yapan komut "
+            "kullanıcınındır ve cevabı firmware verir.")
+        say(f"  başlatmak:   virsh -c {URI} start {a.name}")
+        say(f"  durum:       {self_cmd('guest', '--name', a.name, 'status')}")
+        say(f"  kartı vermek: "
+            f"{self_cmd('guest', '--name', a.name, 'passthrough')}")
+        say(f"  geri almak:  {self_cmd('guest', '--name', a.name, 'clean')} "
+            f"-- domain'i kaldırır, diske dokunmaz")
+        return 0
 
     # 5. run it
     guard_exclusive_devices(a.name)
@@ -3628,6 +3846,14 @@ def main(argv: list[str] | None = None) -> int:
     b.add_argument("--system-nvme", metavar="PCI", default="",
                    help="sistem diski qcow2 değil bu NVMe denetleyicisi olsun "
                         "(kip 2; --disk ve --size ile birlikte verilmez)")
+    # NOT a subcommand of its own, and the reason is the same one that keeps
+    # `nvme --attach` from re-deriving K14: a second code path that defines a
+    # domain is a second answer, and the one that drifts is the one nobody
+    # reads until it defines a domain wrongly.
+    b.add_argument("--adopt", action="store_true",
+                   help="--system-nvme'deki diskte zaten kurulu bir sistem "
+                        "var: domain'i onun etrafında tanımla, kurma "
+                        "(ortam takılmaz, misafir başlatılmaz, diske yazılmaz)")
     b.add_argument("--memory", type=int, default=8192, help="MiB")
     b.add_argument("--vcpu", type=int, default=8)
     b.add_argument("--locale", default="tr-TR")
@@ -3717,7 +3943,11 @@ def main(argv: list[str] | None = None) -> int:
 
     a = p.parse_args(argv)
 
-    if getattr(a, "win_iso", None) == "":
+    # THE SEARCH IS THE INSTALLING ROUND'S, AND SO IS ITS REFUSAL. An adopting
+    # round attaches no media at all, so "no Windows ISO on this machine" says
+    # nothing about whether it can run -- dying here would refuse a round whose
+    # whole point is that the install already happened somewhere else.
+    if getattr(a, "win_iso", None) == "" and not getattr(a, "adopt", False):
         found = sorted(Path.home().glob("İndirilenler/*windows*11*.iso"))
         if not found:
             die("Windows ISO'su bulunamadı, --win-iso ile ver")

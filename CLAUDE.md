@@ -26,7 +26,9 @@ karar** (2026-08-19, kullanıcı kararı). **Dört komut reddeder:** doğruluğu
 cevabına bağlı olan `install`, `selftest`, `guest passthrough`; artı bilerek
 **ek fren** olarak `build --system-nvme` — kapının ölçütleri bir diski
 bölümlemenin güvenliği hakkında hiçbir şey söylemiyor, ama geri alınamayan tek
-yol o. `install --check` sorar ve yalnızca **uyarır**, çünkü hiçbir şey yazmaz.
+yol o. **Freni açan şey silme, bayrak değil:** aynı komut `--adopt` ile diske
+yazmadığı için kapıyı sormaz, ve muafiyeti aşağıdaki üçüncü sınıfta adıyla
+yazılı. `install --check` sorar ve yalnızca **uyarır**, çünkü hiçbir şey yazmaz.
 
 **Üç sınıf bilerek reddetmez, ve muafiyetler burada adlarıyla yazılır** — adı
 yazılmayan muafiyet, kuralı ilk aykırı komutta yalana çevirir:
@@ -41,9 +43,14 @@ yazılmayan muafiyet, kuralı ilk aykırı komutta yalana çevirir:
 - **Host'un hiçbir şeyini hareket ettirmeyen yollar** — `build --disk` bir imaj
   ve **kartsız** bir domain üretir. Sınıf dışı makinede koşar ve yalnızca
   Looking Glass'sız kalır; `ivshmem_parts()` bunu düşmek yerine **söyler**.
-- **Sorusunun daha dar ve daha sert sahibi olan yollar** — ikisi de
+- **Sorusunun daha dar ve daha sert sahibi olan yollar** — üçü de
   `core.inventory`'ye: `guest nvme --attach` bayraksız K14 reddine, `guest usb`
-  `usb_verdict()`'in `REFUSE`'una cevap verir. Oraya ikinci ve daha geniş bir kapı koymak ikinci bir cevap olur;
+  `usb_verdict()`'in `REFUSE`'una, `build --adopt` de aynı K14 reddine cevap
+  verir. Sonuncusu 2026-08-19'da eklendi ve ölçütü silmenin yokluğudur: tur
+  cevap dosyası üretmiyor, ortam takmıyor, misafir başlatmıyor — yazdığı tek
+  şey `nvme --attach`'in zaten kapısız yazdığı satır artı bir boot girdisi, ve
+  `clean` onu bütünüyle geri alıyor. Aynı satırı yazan iki komutu iki ayrı
+  kapıya bağlamak, çiftin sapma biçimidir. Oraya ikinci ve daha geniş bir kapı koymak ikinci bir cevap olur;
   sapan da kimsenin okumadığı olur.
 
 Kapının geri kalan olguları, sınıfından bağımsız:
@@ -75,8 +82,8 @@ Kapının geri kalan olguları, sınıfından bağımsız:
   kaldırılmaz — `'yes'` libvirt'i aynı yollara ikinci yazar yapardı.
   - **Yasağın konusu kartın yollarıdır, "PCI" sözcüğü değil** (2026-08-19'da
     ölçülerek ayrıldı). Kart **dışındaki** bir PCI cihazı için libvirt tek yazar
-    olabilir: `guest nvme` ve `build --system-nvme` NVMe denetleyicisini
-    `managed='yes'` ile domain'in kalıcı tanımına yazar, bağlamayı domain
+    olabilir: `guest nvme`, `build --system-nvme` ve `build --adopt` NVMe
+    denetleyicisini `managed='yes'` ile domain'in kalıcı tanımına yazar, bağlamayı domain
     başlarken libvirt yapar, araç hiçbir sysfs yoluna dokunmaz. İzin veren üç
     ölçüm, üçü de bu maddenin şartı: (1) `nvme` sürücüsünün boşaltma dansı yok —
     unbind'da bırakıyor, probe'da geri alıyor (2026-08-18, boş Crucial
