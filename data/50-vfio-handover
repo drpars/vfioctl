@@ -121,14 +121,55 @@ _check_unconfigured() {
     exit 2
 }
 
-[ -r "$VFIO_CONF" ] || { _check_unconfigured "no readable $VFIO_CONF"; exit 0; }
+# THE ARGUMENTS AND THE LOG ARE SET UP BEFORE THE CONFIGURATION IS READ,
+# because the arm right below leaves without them otherwise -- and leaving
+# without them is leaving silently. An unreadable vfio.conf is the one failure
+# whose whole symptom is that nothing happens: no card moves, the guest starts
+# on the host's card, and the log the operator goes to read has no line for the
+# run at all. The empty-list arm further down has always written one; this one
+# could not, only because it ran too early.
+#
+# THE FOUR MOVE AS ONE BLOCK. log() reads GUEST, OP and SUBOP under `set -u`,
+# so lifting VFIO_LOG alone would abort every call before the op gate -- at
+# prepare/begin that means no guest starts at all, which is a far worse failure
+# than the silence being fixed here.
+#
+# Only VFIO_LOG's DEFAULT moves up. The check-mode override stays below the
+# source (see VFIO_HOOK_CHECK), because a hand-written vfio.conf may assign
+# VFIO_LOG plainly and a verification run must never be able to append to the
+# real log. A conf assigning it plainly still wins over this default, which is
+# the order that was already in force.
+GUEST=${1:-}
+OP=${2:-}
+SUBOP=${3:-}
+
+: "${VFIO_LOG:=/var/log/vfio-hook.log}"
+
+log() {
+    printf '%s [%s %s/%s] %s\n' \
+        "$(date -Is)" "$GUEST" "$OP" "$SUBOP" "$*" >>"$VFIO_LOG"
+}
+
+die() {
+    log "$*"
+    printf 'vfio-hook: %s\n' "$*" >&2
+    exit 1
+}
+
+# Check mode answers on stdout and exits 2 before the log line, exactly as the
+# empty-list arm below does; the live path takes the log line and exits 0,
+# because a non-zero exit at prepare/begin stops the guest from starting.
+[ -r "$VFIO_CONF" ] || {
+    _check_unconfigured "no readable $VFIO_CONF"
+    log "$VFIO_CONF is not readable; no handover, guest starts on the host's card"
+    exit 0
+}
 # shellcheck source=/dev/null
 . "$VFIO_CONF"
 
 : "${VFIO_DEVICES:=}"
 : "${NVIDIA_MODULES:=nvidia_drm nvidia_modeset nvidia_uvm nvidia}"
 : "${NVIDIA_SERVICES:=nvidia-powerd}"
-: "${VFIO_LOG:=/var/log/vfio-hook.log}"
 
 # Drivers this script is allowed to detach a device from. The list is an
 # allow-list rather than a deny-list on purpose: an unknown driver is a driver
@@ -172,21 +213,6 @@ _check_unconfigured() {
 # Verification mode (see below) has to be runnable by the user who defined the
 # domain, and /var/log is not theirs to write.
 [ -n "${VFIO_HOOK_CHECK:-}" ] && VFIO_LOG=/dev/null
-
-GUEST=${1:-}
-OP=${2:-}
-SUBOP=${3:-}
-
-log() {
-    printf '%s [%s %s/%s] %s\n' \
-        "$(date -Is)" "$GUEST" "$OP" "$SUBOP" "$*" >>"$VFIO_LOG"
-}
-
-die() {
-    log "$*"
-    printf 'vfio-hook: %s\n' "$*" >&2
-    exit 1
-}
 
 [ -n "$VFIO_DEVICES" ] || {
     _check_unconfigured "$VFIO_CONF lists no devices"
