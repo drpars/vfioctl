@@ -350,8 +350,11 @@ istiyor ve o tur koşulmadı — bu kip bugün **sınanmamış** bir yoldur.
 bölümlüyor. Envanterin `✓`'i *"host onun üstünde durmuyor"* demektir, **"boş"
 demek değil** — `inventory` diskin içeriğini hiç okumaz, yani veri dolu ama
 bağlı olmayan bir disk de `✓` alır. O yüzden kip 2 diski **model + seri** ile
-yazar ve `EVET` yazılmasını bekler; `--yes` ile geçilir, ve **tty yoksa soru
-sorulamadığı için tur reddedilir** (sorulacak kimse olmaması onay değildir).
+yazar ve `EVET` yazılmasını bekler; `--confirm-wipe` ile geçilir, ve **tty
+yoksa soru sorulamadığı için tur reddedilir** (sorulacak kimse olmaması onay
+değildir). Bayrak bilerek `--yes` değil: `setup`'ın `--yes`'i *"kartı
+masaüstünün içinden devret"* demek ve `build --setup` aynı yolu sürüyor —
+tek bayrak iki onayı taşırdı.
 
 **`clean` fiziksel diske dokunmaz.** Domain'i ve çalışma dizinini kaldırır,
 sonra sistem diskinin **kimliğiyle** orada durduğunu ve silinmemesinin bilerek
