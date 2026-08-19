@@ -1777,7 +1777,7 @@ def _usb_status(name: str, devices: list, held: list, inventory, probe) -> int:
         verdict, reasons = inventory.usb_verdict(device, devices, inputs)
         mark, colour = inventory.MARKS[verdict]
         where = "MİSAFİRDE" if (device.vendor, device.product) in held else "host"
-        print(f"  {inventory._paint(mark, colour)} {device.ids}  {device.name:<6} "
+        print(f"  {inventory.paint(mark, colour)} {device.ids}  {device.name:<6} "
               f"{where:<10} {inventory._usb_title(device)}")
         for reason in reasons:
             print(f"      {reason}")
