@@ -492,6 +492,18 @@ oysa bu araç hiçbir yerde okumaz — `inventory`'nin `✓`'i "boş" demediği 
 bayrağın sessizliği de "açılır" demez. Tur domain'i tanımlar ve bunu söyler;
 cevabı ilk başlatma verir ve o komut kullanıcınındır.
 
+**O komut bir kez koşuldu, ve cevap evet** (2026-08-19): kip 2 ile kurulmuş bir
+disk `clean` ile serbest bırakıldı, `--adopt` ile yeniden tanımlandı ve
+**12 saniyede açıldı**. Bu, aracın hükmünü değiştirmez — turun sessizliği hâlâ
+bir vaat değil — ama bir tuzağı kapatıyor: `clean` domain'i `undefine --nvram`
+ile kaldırdığı için sahiplenen domain **taze NVRAM**'le doğar, yani Windows'un
+firmware'e yazdığı önyükleme girdisi orada yoktur. Ölçülen: bu engel değil.
+Makine açıldı ve açıldıktan sonra `bcdedit /enum firmware` NVRAM'de yeniden
+yazılmış bir `Windows Boot Manager` girdisi gösteriyor — yol kendini onarıyor.
+(ESP'de yedek yol `\EFI\Boot\bootx64.efi` turdan önce ölçüldü ve vardı;
+ilk açılışın onu mu yoksa firmware'in kendi cihaz girdisini mi kullandığı
+ayırt **edilmedi**.)
+
 **Bu tur `EVET` sormaz, çünkü silecek bir şeyi yok** — ama `--confirm-wipe` ile
 birlikte verilirse **reddeder**: silme onayı, silmeyen bir turda sessizce kabul
 edilmez. `--setup` de reddedilir; bu tur misafiri başlatmıyor, `setup --start`
