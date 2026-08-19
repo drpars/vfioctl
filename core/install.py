@@ -549,11 +549,23 @@ def uninstall(profile_name: str | None = None, kvmfr_mb: int | None = None) -> i
     AND THE WARNING THAT OUTLIVES IT: removing these files without putting
     something in their place does not return the machine to "before" -- it
     returns it to a machine whose passthrough setup is no longer reproducible.
+
+    WHY THE GATE IS ASKED HERE AND NOT OBEYED. Every other writing subcommand
+    stops on a closed gate; this one is the way back out. A machine can fall
+    out of class after install already wrote -- a flipped MUX, a firmware
+    setting, a kernel that stopped exporting an attribute -- and refusing then
+    would strand this tool's files in /etc on the one machine whose owner wants
+    them gone. So the answer is read and said out loud rather than dropped on
+    the floor: the exemption is a decision, and a decision that is not visible
+    in the output is indistinguishable from the bug of forgetting to ask.
     """
     open_gate, p, _ = doctor.gate(profile_name)
     if p is None:
         print("Profil yok — bu makinede kurulmuş bir şey iddia edilmiyor.")
         return 1
+    if not open_gate:
+        _warn("kapı kapalı — yine de kaldırılıyor: bu komut kurulanı geri alan "
+              f"yoldur ({provenance.command('doctor')})")
 
     machine = probe.read_machine()
     layout = resolve(machine, p)
