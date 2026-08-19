@@ -75,6 +75,16 @@ already called stale, since a refusal that guards a pointer guards nothing; the
 record then follows its drive to wherever the serial now lives, which is what
 keeps a renumbering repairable with the two commands that already exist.
 
+AND `nvme --detach` DELETES ONLY WHAT libvirt BINDS. HOSTDEV_BLOCK matches
+every type='pci' hostdev, card and controller alike, so for a while the address
+argument on its own decided what got removed -- and the card's own line was
+removable by it, quietly, since the read-back only asks whether the address is
+gone. `managed` is the attribute that names the writer (K8): 'no' is the card,
+bound by the handover hook and by nothing else, 'yes' is a controller libvirt
+detaches itself. The refusal is written against the XML rather than against the
+hardware on purpose, so that it still holds when the drive behind an address
+has gone missing -- which is the state --detach exists to repair.
+
 NOTHING PERSONAL REACHES THE REPOSITORY. The account name, the password, the
 locale and the ISO path are asked at run time or passed as flags; the rendered
 autounattend.xml and the helper ISO are written to a 0700 directory under
@@ -981,6 +991,22 @@ HOSTDEV_BLOCK = re.compile(
     re.DOTALL,
 )
 
+# WHAT HOSTDEV_BLOCK CANNOT TELL APART, AND WHO HAS TO ASK. The pattern above
+# matches every type='pci' hostdev, card and disk alike, because both of its
+# callers want the same "which block points at this function" answer. Only
+# `managed` says who binds the device: 'no' for the card, whose one writer is
+# the handover hook (HOSTDEV_XML), 'yes' for a controller libvirt binds itself
+# (NVME_HOSTDEV_XML). Either quote style and any attribute order -- libvirt's
+# dumpxml is normalised, a hand-edited definition is not, and the hook reads
+# type='pci' the same way (data/50-vfio-handover:253).
+HOSTDEV_MANAGED = re.compile(r"<hostdev\b[^>]*\bmanaged=['\"](yes|no)['\"]")
+
+
+def _managed(block: str) -> bool:
+    """Does libvirt bind this hostdev itself? A missing attribute means no."""
+    m = HOSTDEV_MANAGED.search(block)
+    return m is not None and m.group(1) == "yes"
+
 
 def address_parts(address: str) -> dict[str, int]:
     """0000:01:00.0 -> the four numbers libvirt wants, or a refusal."""
@@ -1278,6 +1304,49 @@ def nvme_candidate(address: str):
     return item
 
 
+def guard_nvme_detach(name: str, address: str, blocks: list[str]) -> None:
+    """Refuse to delete a <hostdev> block this subcommand did not write.
+
+    ONLY ONE OF THE TWO BRANCHES WAS EVER FILTERED. --attach goes through
+    nvme_candidate(), which refuses an address that is not an NVMe controller;
+    --detach asked nothing and handed the whole match set to str.replace(). So
+    `nvme --detach <the card's address>` deleted the card's own hostdev line,
+    and deleted it quietly -- the read-back afterwards only asks whether the
+    address is gone, which by then it was.
+
+    WHAT IT LEFT BEHIND WAS WORSE THAN EITHER END STATE. The audio function
+    stays in the definition, and the hook's gate is "any of $DEVICES appears in
+    this XML" while its action is "for dev in $DEVICES"
+    (data/50-vfio-handover:271-284, 427-429, 681-684). The next start therefore
+    still unloads the nvidia stack and binds both functions to vfio-pci: the
+    host loses the card and the guest gets a sound device with no GPU behind
+    it.
+
+    THE TEST IS THE XML, NOT THE HARDWARE, AND THAT IS THE WHOLE DESIGN. The
+    obvious guard -- ask _is_nvme(address) the way --attach does -- would
+    refuse exactly the two states this command exists to repair: an address
+    whose drive is gone and one that now carries something else both read
+    False there, and guard_nvme_identity() prints this very command as their
+    remedy. `managed` is a fact about the block being deleted, and it survives
+    the drive going missing. It needs no profile either -- dgpu_addresses() is
+    the other way to name the card and it dies behind doctor.gate(), which
+    would turn a closed gate into a wrong refusal.
+
+    A refusal rather than a filter, because filtering the card's block out of
+    `blocks` drops the flow into the "not taking it anyway" branch, and that
+    prints a success message about a device the domain visibly does take.
+    """
+    if all(_managed(b) for b in blocks):
+        return
+    die(f"{address} bu domain'de managed='no' yazılmış bir hostdev -- onu "
+        f"libvirt değil devir hook'u bağlıyor. Kart böyle yazılır (K8) ve bu "
+        f"komut ona dokunmaz.\n"
+        f"  Kartı domain'den çıkarmak: "
+        f"{self_cmd('guest', '--name', name, 'passthrough', '--off')} -- o, "
+        f"kartın iki işlevini birlikte alır. Yalnız birini silmek misafire "
+        f"GPU'suz bir ses işlevi bırakır, hook devri yine de yapar.")
+
+
 def cmd_nvme(a):
     """Give a whole NVMe controller to a shut-off domain, take it back, or ask.
 
@@ -1329,6 +1398,7 @@ def cmd_nvme(a):
     blocks = [b for b in HOSTDEV_BLOCK.findall(xml) if _matches(b, address)]
 
     if a.detach:
+        guard_nvme_detach(a.name, address, blocks)
         system = system_nvme_of(a.name)
         stale = False
         if system and system[0] == address:
