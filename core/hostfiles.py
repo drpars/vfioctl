@@ -178,6 +178,12 @@ HOOK = HOOK_DIR / HOOK_NAME
 # and the copy being replaced is, by definition, the older behaviour. Nothing
 # reads /etc/libvirt/hooks/ itself; libvirt wants the exact name "qemu" there.
 HOOK_BACKUP = HOOK_DIR.parent / (HOOK_NAME + ".bak")
+# Where the hook writes. It is the hook's own default (VFIO_LOG in the script,
+# overridable), repeated here because two readers on this side need it --
+# selftest reads it to tell one round's lines from the last one's, doctor reads
+# it to surface an NVMe identity mismatch the hook recorded. Third copy
+# avoided: the two of them import this one.
+HOOK_LOG = Path("/var/log/vfio-hook.log")
 VFIO_CONF = Path("/etc/libvirt/hooks/vfio.conf")
 
 XORG_CONF_DIR = Path("/etc/X11/xorg.conf.d")

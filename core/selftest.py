@@ -73,7 +73,7 @@ def _log_path() -> Path:
 
 
 LOG = _log_path()
-HOOK_LOG = Path("/var/log/vfio-hook.log")
+HOOK_LOG = hostfiles.HOOK_LOG
 PROC = Path("/proc")
 
 # TASK_COMM_LEN - 1: the kernel stores at most 15 bytes of a process name, and

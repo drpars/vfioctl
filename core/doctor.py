@@ -273,6 +273,53 @@ def _check_provenance() -> Check:
     )
 
 
+def _check_nvme_audit() -> Check:
+    """Did the handover hook ever start a guest whose NVMe record went stale?
+
+    THIS IS THE HALF THAT CLOSES THE LOOP. The hook audits every start -- every
+    `virsh start`, virt-manager included -- and only logs, because a refusing
+    check in that file that is wrong means no guest starts on the machine at
+    all. Logging is only worth something if somebody reads it, and the only
+    reader until now was `selftest`, i.e. the mismatch was visible exactly to
+    the people who were already running a full round. Here it costs a line.
+
+    SOFT, AND ON PURPOSE. What it reports is history, not a property of this
+    machine: the address may well have been correct since. A hard check would
+    close the gate over an entry that a later `nvme --detach`/`--attach` pair
+    already fixed.
+
+    None, NOT False, WHEN THE LOG CANNOT BE READ. An uninstalled hook, a fresh
+    machine and a log this user cannot open are all "no answer" -- and one of
+    them is the ordinary state of a card-less setup, where `install` never ran
+    and the hook does not exist. Reporting that as a failure would teach the
+    reader to skip the line.
+    """
+    log = hostfiles.HOOK_LOG
+    try:
+        lines = log.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError as exc:
+        return Check("nvme-denetimi", SOFT, None,
+                     "hook günlüğünde NVMe kimlik uyuşmazlığı",
+                     f"{log} okunamadı ({exc.strerror or exc})")
+
+    faults = [l for l in lines
+              if "nvme audit:" in l and ("MISMATCH" in l or "ABSENT" in l)]
+    if not faults:
+        audited = sum(1 for l in lines if "nvme audit:" in l)
+        return Check("nvme-denetimi", SOFT, True,
+                     "hook günlüğünde NVMe kimlik uyuşmazlığı",
+                     f"{audited} denetim satırı, uyuşmazlık yok"
+                     if audited else "hook henüz NVMe denetimi yazmamış")
+
+    return Check(
+        "nvme-denetimi", SOFT, False,
+        "hook günlüğünde NVMe kimlik uyuşmazlığı",
+        f"{len(faults)} satır; sonuncusu: {faults[-1].strip()}",
+        remedy=f"kaydı tazele (guest --name <ad> nvme --detach/--attach) ya da "
+               f"tamamını oku: grep 'nvme audit' {log}",
+    )
+
+
 def run_checks(machine: probe.Machine, p: Profile | None) -> list[Check]:
     checks = (_checks_with_profile(machine, p) if p
               else _checks_without_profile(machine))
@@ -280,7 +327,8 @@ def run_checks(machine: probe.Machine, p: Profile | None) -> list[Check]:
     # what this machine is -- one is two pieces of software agreeing, the other
     # is which copy of this tool is talking -- and gate() deliberately never
     # sees either.
-    return checks + [_check_lg_release(), _check_provenance()]
+    return checks + [_check_lg_release(), _check_provenance(),
+                     _check_nvme_audit()]
 
 
 # --------------------------------------------------------------------------- #
