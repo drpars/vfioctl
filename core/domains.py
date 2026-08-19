@@ -96,6 +96,42 @@ def domain_xml(name: str, *, inactive: bool = False,
     return out if rc == 0 else None
 
 
+# The qemu:commandline namespace, and the one argument this tool cares about.
+QEMU_NS = {"qemu": "http://libvirt.org/schemas/domain/qemu/1.0"}
+MEM_PATH = re.compile(r"mem-path[\"']?\s*:\s*[\"']([^\"']+)")
+
+
+def _mempaths_of(xml: str) -> set[str]:
+    """The mem-path arguments a domain hands straight to qemu.
+
+    THROUGH THE PARSER FIRST, THEN THE REGEX -- IN THAT ORDER, AND THAT IS THE
+    WHOLE FIX. The value is a JSON blob living inside an XML attribute, so it
+    comes back escaped:
+
+        <qemu:arg value='{&apos;mem-path&apos;:&apos;/dev/kvmfr0&apos;,...}'/>
+
+    A regex over the raw document therefore never finds a quote to match, and
+    this one never matched: measured on this machine, the pattern returns
+    nothing at all against `virsh dumpxml`, so /dev/kvmfr0 was missing from
+    every claim set guard_exclusive_devices() has ever compared. The clash it
+    exists to catch went unguarded, and only the card kept it honest -- both
+    domains here want the card too, so the guard fired on that instead and the
+    hole never showed. A card-less mode-2 guest is exactly the case that would
+    have removed the card from the comparison and left nothing behind it.
+
+    Letting ElementTree unescape the attribute hands over the JSON as qemu
+    itself reads it; the regex then still absorbs either quoting style, which
+    is why it was a regex rather than a JSON parse in the first place.
+    """
+    try:
+        root = ElementTree.fromstring(xml)
+    except ElementTree.ParseError:
+        return set()
+    return {path
+            for arg in root.findall("./qemu:commandline/qemu:arg", QEMU_NS)
+            for path in MEM_PATH.findall(arg.get("value", ""))}
+
+
 def _pci_of(xml: str) -> set[str]:
     """PCI functions a domain's XML takes, as 0000:01:00.0.
 
@@ -145,10 +181,6 @@ def _usb_of(xml: str) -> set[str]:
 def claims_of(name: str, timeout: float | None = None) -> set[str]:
     """Host things this domain takes exclusively: PCI functions and mem-paths.
 
-    The mem-path comes out of qemu:commandline with a regex rather than an XML
-    walk, because the argument is a JSON string inside an attribute and libvirt
-    is free to hand it back with either quoting style.
-
     This is the guards' entry point and it reads the ACTIVE view, which is what
     they have always asked: for a running domain that is what it holds now, and
     for a shut-off one virsh answers with the stored definition.
@@ -156,9 +188,7 @@ def claims_of(name: str, timeout: float | None = None) -> set[str]:
     xml = domain_xml(name, timeout=timeout)
     if xml is None:
         return set()
-    claims = {f"mem-path:{p}" for p in
-              re.findall(r"mem-path[\"']?\s*:\s*[\"']([^\"']+)", xml)}
-    return claims | _pci_of(xml)
+    return {f"mem-path:{p}" for p in _mempaths_of(xml)} | _pci_of(xml)
 
 
 def pci_claims_of(name: str, timeout: float | None = None) -> set[str]:
