@@ -404,7 +404,7 @@ def session_checks(dgpu: str | None, igpu: str | None) -> list[Check]:
 
     if dgpu is None:
         checks.append(Check(
-            "seans-pin", SOFT, None, "dGPU'yu tutan bir şey yok",
+            "seans-pin", SOFT, None, "dGPU'yu tutan bir şey görünmüyor",
             "dGPU bulunamadı — tutulacak bir kart yok",
         ))
     elif driver == "vfio-pci":
@@ -412,7 +412,7 @@ def session_checks(dgpu: str | None, igpu: str | None) -> list[Check]:
         # it. Reading that as a pass would report the criterion as met on the
         # one occasion it cannot be tested.
         checks.append(Check(
-            "seans-pin", SOFT, None, "dGPU'yu tutan bir şey yok",
+            "seans-pin", SOFT, None, "dGPU'yu tutan bir şey görünmüyor",
             f"{dgpu} şu an vfio-pci'de (misafirde olabilir) — bu durumda "
             "seans zaten tutamaz, ölçüm anlamlı değil",
         ))
@@ -421,14 +421,15 @@ def session_checks(dgpu: str | None, igpu: str | None) -> list[Check]:
         where = f"/dev/dri/{dcard} ya da /dev/nvidia*" if dcard else "/dev/nvidia*"
         if held:
             checks.append(Check(
-                "seans-pin", SOFT, False, "dGPU'yu tutan bir şey yok",
+                "seans-pin", SOFT, False, "dGPU'yu tutan bir şey görünmüyor",
                 "TUTULUYOR: " + "; ".join(str(h) for h in held),
             ))
         elif screens:
-            # The holder that an unprivileged fd scan cannot see: the display
-            # manager's greeter runs as root. It says so in its own log.
+            # One holder an unprivileged fd scan cannot see -- not the only
+            # one, which is why the pass below states its blind spot: the
+            # display manager's greeter runs as root. It says so in its own log.
             checks.append(Check(
-                "seans-pin", SOFT, False, "dGPU'yu tutan bir şey yok",
+                "seans-pin", SOFT, False, "dGPU'yu tutan bir şey görünmüyor",
                 f"koşan Xorg'da {screens} NVIDIA GPU screen var — greeter'ın "
                 "X sunucusu kartı açık tutuyor (20-vfio-no-autoaddgpu.conf "
                 "yerinde değil ya da bu sunucu ondan önce başlamış)",
@@ -438,9 +439,23 @@ def session_checks(dgpu: str | None, igpu: str | None) -> list[Check]:
             # non-zero screen count is one of the two ways this check fails,
             # and says so in its own words), and install prints the X server's
             # own line just above this block.
+            #
+            # WHY THE LIMIT IS STATED HERE AND IN NO OTHER BRANCH. A bound on
+            # the search only changes what "found nothing" is worth; a branch
+            # that found a holder already has its answer. And why this stays a
+            # pass rather than "could not measure": the criterion is about the
+            # graphics session, whose processes this scan does read, so the
+            # question was answered. What was not answered is the wider claim
+            # the title used to make -- hence "görünmüyor", and hence a line
+            # saying how much was never looked at.
+            blind = session.unreadable_processes()
             checks.append(Check(
-                "seans-pin", SOFT, True, "dGPU'yu tutan bir şey yok",
-                f"hiçbir süreç {where} tutmuyor",
+                "seans-pin", SOFT, True, "dGPU'yu tutan bir şey görünmüyor",
+                f"hiçbir okunabilir süreç {where} tutmuyor; ama tarama "
+                f"yetkisiz — {blind.total} süreç okunamadı ({blind.own_uid} "
+                f"tanesi bu kullanıcının) ve kartı tutan bir root süreci "
+                f"oraya düşer (ölçüldü: nvidia-powerd; devirde hook onu "
+                f"kendisi durdurur)",
             ))
 
     # The name the session half binds to. vfioctl writes the udev rule; the

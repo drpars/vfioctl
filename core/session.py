@@ -56,6 +56,13 @@ PROC = Path("/proc")
 # card, no /dev/nvidia* fd exists, and nvidia_drm still sits at refcnt=1.
 NVIDIA_NODE = re.compile(r"^/dev/nvidia([0-9]+|ctl)$")
 
+# A kernel thread has no fd table at all, so being refused its /proc/PID/fd is
+# not a blind spot -- it is a directory with nothing to hide. Counting them
+# would inflate the number by an order of magnitude and make it useless:
+# measured on this machine, 344 processes were unreadable and 301 of them were
+# kernel threads. The flag lives in /proc/PID/stat, which is world-readable.
+PF_KTHREAD = 0x00200000
+
 
 @dataclass
 class Session:
@@ -161,11 +168,22 @@ def _scan(match) -> list[Holder]:
     whether a handover works is which files are open, and that is what is
     read.
 
-    Only this user's processes are readable without privilege, and the one
-    holder that hides there is the display manager's X greeter, running as
-    root. It is not missed: it is measured from the GPU screens it writes into
-    its own log (hostfiles.gpu_screens), which is how it was caught the first
-    time.
+    WHAT THIS SCAN CANNOT SEE, AND WHY ITS LIMIT IS REPORTED WITH ITS RESULT.
+    An unprivileged reader gets only the fd tables it is allowed to trace, so a
+    holder can hide from it. One does, and was caught early: the display
+    manager's X greeter runs as root, and it is not missed only because a
+    second source measures it -- the GPU screens it writes into its own log
+    (hostfiles.gpu_screens). That fix covered the one instance and left the
+    general case open. nvidia-powerd, also root, held eleven fds of
+    /dev/nvidia0 while doctor printed that nothing held the card (measured
+    2026-08-19), and it is not only root: setuid and setgid processes of this
+    same user drop out of the scan too.
+
+    There is no second source to add for the general case. /proc/driver/nvidia
+    lists no clients, debugfs is root-only, and doctor is the one command that
+    must not ask for privilege. So what the caller gets instead is the size of
+    what could not be looked at -- unreadable_processes() -- and states its
+    finding at the width it actually measured.
     """
     out: list[Holder] = []
     own = os.getpid()
@@ -212,6 +230,85 @@ def card_holders(card: str | None) -> list[Holder]:
             wanted is not None and target == wanted)
 
     return _scan(match)
+
+
+@dataclass
+class Blind:
+    """How much of the machine the fd scan above was not allowed to look at.
+
+    WHY A COUNT AND NOT A LIST. Naming the processes would need their fd
+    tables, which is the very thing that was refused; the names are readable
+    but say nothing about what they hold. A count is what an unprivileged
+    caller can honestly produce, and it is enough for its one job: telling a
+    reader how much "found nothing" is worth.
+
+    own_uid is separated out because it is the half that touches the stated
+    criterion. Root's processes are not the graphics session, and the hook
+    stops the one of them it knows by name before it unloads anything. Blind
+    processes of *this* user are what the session half is actually about --
+    and there are some, which is the part that is easy to get wrong: matching
+    uid does not make a process readable, because setuid and setgid binaries
+    drop out of an unprivileged scan as well (measured here: (sd-pam),
+    fusermount3, ssh-agent).
+    """
+
+    total: int      # userspace processes whose fd table could not be read
+    own_uid: int    # of those, the ones running as this user
+
+
+def _is_kernel_thread(entry: Path) -> bool:
+    # comm sits in parentheses in /proc/PID/stat and may itself contain spaces
+    # and brackets, so the fields are counted from the last ')' rather than by
+    # splitting the whole line. Flags is field 9, the seventh after comm.
+    try:
+        stat = (entry / "stat").read_text(encoding="utf-8")
+        flags = int(stat[stat.rindex(")") + 2:].split()[6])
+    except (OSError, ValueError, IndexError):
+        return False
+    return bool(flags & PF_KTHREAD)
+
+
+def _real_uid(entry: Path) -> int | None:
+    try:
+        for line in (entry / "status").read_text(encoding="utf-8").splitlines():
+            if line.startswith("Uid:"):
+                return int(line.split()[1])
+    except (OSError, ValueError, IndexError):
+        return None
+    return None
+
+
+def unreadable_processes() -> Blind:
+    """Userspace processes whose fd table an unprivileged scan cannot read.
+
+    A process that disappears between the glob and the open is not counted:
+    it left no fd table behind to hide anything in, so it is not a blind spot
+    but a race, and treating it as one would make the number drift upward on
+    a busy machine.
+    """
+    me = os.getuid()
+    own_pid = os.getpid()
+    total = own_uid = 0
+    for entry in PROC.glob("[0-9]*"):
+        try:
+            pid = int(entry.name)
+        except ValueError:
+            continue
+        if pid == own_pid:
+            continue
+        try:
+            list((entry / "fd").iterdir())
+            continue
+        except PermissionError:
+            pass
+        except OSError:
+            continue
+        if _is_kernel_thread(entry):
+            continue
+        total += 1
+        if _real_uid(entry) == me:
+            own_uid += 1
+    return Blind(total=total, own_uid=own_uid)
 
 
 # --------------------------------------------------------------------------- #
