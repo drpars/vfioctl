@@ -113,6 +113,12 @@ SETUP_LOG = Path("/tmp/vfioctl-setup.log")
 #     redefined from somebody else's file loses the mark and falls closed.
 MARKER_NS = "https://github.com/drpars/vfioctl"
 
+# The prefix libvirt writes into the stored XML (`<vfioctl:built-by/>`). It is
+# the template's spelling, and `--set` takes it as --key; changing it here
+# without changing the template would leave a domain carrying two blocks for
+# one namespace.
+MARKER_KEY = "vfioctl"
+
 DEFAULT_VIRTIO_ISO = Path("/var/lib/libvirt/images/virtio-win.iso")
 
 # Measured on the tr-TR 25H2 media, 2026-08-05: six images, no N editions, Pro
@@ -202,18 +208,259 @@ def self_cmd(*words: str) -> str:
 # guards
 # --------------------------------------------------------------------------- #
 
-def marker_of(name: str) -> str | None:
-    """Our mark on a defined domain, or None when it does not carry one.
+def marker_block(name: str):
+    """Our whole <vfioctl> metadata block, parsed, or None when there is none.
 
-    The text is what decides, not the exit code: virsh answers rc=0 with an
-    empty body for a domain that has no metadata in this namespace, so
-    `returncode == 0` would report every guest on the machine as ours.
+    virsh hands the block back with the namespace prefix stripped, so the
+    children are plain `built-by` / `nvme` and not `vfioctl:built-by`. Measured
+    2026-08-19 against libvirt 12.6.0, same round that measured `--set`.
     """
     r = virsh("metadata", name, "--uri", MARKER_NS, check=False)
     if r.returncode != 0:
         return None
     text = r.stdout.strip()
-    return text or None
+    if not text:
+        return None
+    try:
+        return ElementTree.fromstring(text)
+    except ElementTree.ParseError:
+        return None
+
+
+def marker_of(name: str) -> str | None:
+    """Our ownership mark on a defined domain, or None when it carries none.
+
+    THE QUESTION IS <built-by>, NOT "IS THERE ANYTHING IN OUR NAMESPACE". It
+    used to be the latter, and that was correct only while <built-by> was the
+    only thing this tool ever wrote there. It stopped being correct the moment
+    a second child arrived: `nvme --attach` records the drive's identity in
+    this same block, and it is allowed to do that to a domain we did NOT build
+    -- lending a data disk to a hand-made guest is the feature's only real
+    target. Measured 2026-08-19 on a throwaway domain: writing the identity
+    record alone made the old text test answer "ours", which would have handed
+    `clean` a foreign domain to destroy. Asking for the element closes that.
+
+    Exit code still decides nothing: virsh answers rc=0 with an empty body for
+    a domain that has no metadata in this namespace, so `returncode == 0` would
+    report every guest on the machine as ours.
+    """
+    root = marker_block(name)
+    if root is None:
+        return None
+    built_by = root.find("built-by")
+    if built_by is None:
+        return None
+    return built_by.get("role") or "built-by"
+
+
+def write_marker(name: str, root) -> None:
+    """Replace our metadata block with `root`, or drop it when it is empty.
+
+    `--set` REPLACES THE WHOLE NAMESPACE BLOCK -- it does not merge, and a
+    sibling left out of the payload is gone (measured 2026-08-19). So every
+    writer here reads the block first and hands back all of it. An emptied
+    block is removed rather than left as `<vfioctl/>`: an empty shell is not
+    ownership, but it is one careless `if text:` away from being read as it.
+    """
+    if len(root) == 0:
+        virsh("metadata", name, "--uri", MARKER_NS, "--config", "--remove",
+              check=False)
+        return
+    # Re-indent before serialising: ElementTree keeps the whitespace text nodes
+    # of whatever it parsed, so an element appended to a block libvirt pretty-
+    # printed lands hard against its sibling. Nothing reads that layout, but a
+    # human runs `dumpxml` on this file when something has gone wrong.
+    ElementTree.indent(root, space="  ")
+    virsh("metadata", name, "--uri", MARKER_NS, "--key", MARKER_KEY,
+          "--config", "--set", ElementTree.tostring(root, encoding="unicode"))
+
+
+# --------------------------------------------------------------------------- #
+# nvme identity: what the XML points at vs. what is actually there
+# --------------------------------------------------------------------------- #
+
+# WHY THIS EXISTS. `nvme --attach` writes a bare PCI address into the domain --
+# four numbers, no identity -- and K14's refusal runs only at the moment of
+# writing. Between that write and the next `virsh start` the machine may
+# renumber: this one did, on 2026-08-17, when a disk was swapped and eight
+# addresses moved. libvirt then binds whatever now sits at that address, the
+# host's boot disk included, and it does so with managed='yes', i.e. by taking
+# it away from the host on its own. Nothing between the two moments asks the
+# question, and the handover hook has no idea NVMe exists.
+#
+# The record below is the missing half: at attach time we write down WHAT the
+# drive is, so that later something can ask whether the address still carries
+# it. The record deliberately holds an identity and not a location -- this
+# workspace has already paid for the other choice once, when 70-vfio-igpu.rules
+# was keyed to a fixed address, the swap moved the iGPU, and the rule silently
+# never fired for three weeks.
+
+NVME_RECORD = "nvme"
+
+# What a check can conclude. Only MISMATCH and ABSENT are faults; OPAQUE is the
+# normal state of a controller that is inside a running guest, and UNRECORDED
+# is the normal state of a domain edited before this record existed.
+NVME_OK = "ok"
+NVME_MISMATCH = "mismatch"
+NVME_OPAQUE = "opaque"
+NVME_UNRECORDED = "unrecorded"
+NVME_ABSENT = "absent"
+
+NVME_FAULTS = (NVME_MISMATCH, NVME_ABSENT)
+
+MARKS_NVME = {
+    NVME_OK: "✓",
+    NVME_MISMATCH: "✗",
+    NVME_ABSENT: "✗",
+    NVME_OPAQUE: "·",
+    NVME_UNRECORDED: "!",
+}
+
+
+class NvmeCheck:
+    """One address, one verdict, one line of why.
+
+    A plain class and not a @dataclass on purpose: vfioctl loads this file with
+    exec_module() and never puts it in sys.modules, so `cls.__module__`
+    resolves to nothing and the decorator dies while resolving the postponed
+    annotations this file's `from __future__` turns on. Measured 2026-08-19 on
+    Python 3.14.
+    """
+
+    def __init__(self, address: str, state: str, detail: str):
+        self.address = address
+        self.state = state
+        self.detail = detail
+
+
+def nvme_records(name: str) -> dict[str, dict[str, str]]:
+    """Recorded identities for this domain, keyed by PCI address."""
+    root = marker_block(name)
+    if root is None:
+        return {}
+    out: dict[str, dict[str, str]] = {}
+    for element in root.findall(NVME_RECORD):
+        address = (element.get("address") or "").lower()
+        if address:
+            out[address] = dict(element.attrib)
+    return out
+
+
+def record_nvme(name: str, ident) -> None:
+    """Write down what the drive at this address is, replacing any older note."""
+    root = marker_block(name)
+    if root is None:
+        root = ElementTree.Element(MARKER_KEY)
+    for element in list(root.findall(NVME_RECORD)):
+        if (element.get("address") or "").lower() == ident.address:
+            root.remove(element)
+    element = ElementTree.SubElement(root, NVME_RECORD)
+    element.set("address", ident.address)
+    for key in ("ids", "model", "serial"):
+        value = getattr(ident, key)
+        if value:
+            element.set(key, value)
+    write_marker(name, root)
+
+
+def forget_nvme(name: str, address: str) -> None:
+    """Drop the note for an address the domain no longer takes."""
+    root = marker_block(name)
+    if root is None:
+        return
+    gone = False
+    for element in list(root.findall(NVME_RECORD)):
+        if (element.get("address") or "").lower() == address:
+            root.remove(element)
+            gone = True
+    if gone:
+        write_marker(name, root)
+
+
+def check_nvme_identity(name: str) -> list[NvmeCheck]:
+    """Does every NVMe address this domain claims still hold the same drive?
+
+    THE LADDER IS ORDERED BY WHAT STAYS READABLE, and that ordering is the
+    whole design. Vendor:device and the PCI class come out of config space and
+    the kernel exposes them under any driver, vfio-pci included; the serial
+    comes from a directory the *nvme driver* creates, which is gone for as long
+    as a guest holds the controller.
+
+    A check written the obvious way -- read the serial, compare, shrug if it is
+    missing -- fails on the one case that motivated the whole thing. When an
+    address stops being an NVMe controller at all there is no serial to read
+    either, so "cannot tell" and "this is now an Ethernet card" arrive looking
+    identical. Measured on this machine: 04:00.0 held an NVMe slot, and after
+    the swap it holds a Realtek 8125 whose model and serial read as None,
+    exactly like a handed-over drive. So the class is asked first, before
+    anything is allowed to be inconclusive.
+    """
+    sys.path.insert(0, str(HERE.parent))
+    from core import probe
+
+    records = nvme_records(name)
+    out: list[NvmeCheck] = []
+    for address in sorted(c for c in pci_claims(name) if c in records or _is_nvme(c)):
+        note = records.get(address)
+        ident = probe.nvme_identity(address)
+        if note is None:
+            out.append(NvmeCheck(address, NVME_UNRECORDED,
+                                 "kimlik kaydı yok -- bu satırı doğrulayacak "
+                                 "bir şey yok"))
+            continue
+        was = note.get("model") or note.get("ids") or "(kayıtsız)"
+        if not ident.present:
+            out.append(NvmeCheck(address, NVME_ABSENT,
+                                 f"bu adreste cihaz yok; kayıt: {was}"))
+            continue
+        if not ident.is_nvme:
+            out.append(NvmeCheck(address, NVME_MISMATCH,
+                                 f"bu adres artık NVMe değil (sınıf "
+                                 f"{ident.pci_class}, {ident.ids}); "
+                                 f"kayıt: {was}"))
+            continue
+        if note.get("ids") and ident.ids and note["ids"] != ident.ids:
+            out.append(NvmeCheck(address, NVME_MISMATCH,
+                                 f"model kimliği değişmiş: kayıt "
+                                 f"{note['ids']}, şimdi {ident.ids}"))
+            continue
+        if ident.serial is None:
+            out.append(NvmeCheck(address, NVME_OPAQUE,
+                                 f"seri okunamıyor (cihaz devredilmiş ya da "
+                                 f"nvme sürücüsü bağlı değil); model kimliği "
+                                 f"uyuyor: {ident.ids}"))
+            continue
+        if note.get("serial") and note["serial"] != ident.serial:
+            out.append(NvmeCheck(address, NVME_MISMATCH,
+                                 f"seri değişmiş: kayıt {note['serial']}, "
+                                 f"şimdi {ident.serial} ({ident.model})"))
+            continue
+        out.append(NvmeCheck(address, NVME_OK,
+                             f"{ident.model} {ident.serial}"))
+    return out
+
+
+def guard_nvme_identity(name: str) -> None:
+    """Refuse to start a domain whose NVMe record no longer describes reality.
+
+    THIS CLOSES THE DEFECT ONLY ON THE PATHS THIS TOOL OPENS, and saying so is
+    part of the fix rather than an apology for it. `virsh start` by hand, or
+    virt-manager, reach libvirt without passing through here; the universal
+    place is the handover hook, and the hook's half of this deliberately only
+    logs for now -- a refusing hook that is wrong means no VM starts on the
+    machine at all, and the weight of the fault it would be refusing has not
+    been measured yet.
+    """
+    faults = [c for c in check_nvme_identity(name) if c.state in NVME_FAULTS]
+    if not faults:
+        return
+    for check in faults:
+        say(f"  {check.address}: {check.detail}")
+    die(f"'{name}' başlatılmıyor -- XML'deki NVMe adresi kayıtlı diski artık "
+        f"göstermiyor. Adresler yeniden numaralandıysa doğrusunu "
+        f"{self_cmd('inventory')} söyler; kaydı tazelemek için "
+        f"{self_cmd('guest', '--name', name, 'nvme', '--detach', faults[0].address)} "
+        f"ve doğru adresle yeniden --attach.")
 
 
 def domain_disks(name: str) -> set[Path]:
@@ -709,6 +956,8 @@ def cmd_nvme(a):
             f"{' '.join(held) or '(yok)'}")
         for addr in held:
             say(f"  {addr} şu an host'ta: {host_driver_of(addr)}")
+        for check in check_nvme_identity(a.name):
+            say(f"  {MARKS_NVME[check.state]} {check.address}: {check.detail}")
         say(f"Aday olanlar: {self_cmd('inventory')}")
         return 0
 
@@ -754,6 +1003,18 @@ def cmd_nvme(a):
 
     redefine(xml)
 
+    # The identity note goes in AFTER the redefine, never before: `define`
+    # replaces the stored XML with the text handed to it, so a metadata write
+    # made first would be dumped, edited around and then written back out of an
+    # older copy -- i.e. silently undone. Measured order, not a guess.
+    if a.detach:
+        forget_nvme(a.name, address)
+    else:
+        sys.path.insert(0, str(HERE.parent))
+        from core import probe
+        ident = probe.nvme_identity(address)
+        record_nvme(a.name, ident)
+
     # Read back rather than trust the define: a lost ownership mark or a dropped
     # ivshmem block only surfaces as "Looking Glass shows nothing" much later.
     after = virsh("dumpxml", a.name).stdout
@@ -769,6 +1030,10 @@ def cmd_nvme(a):
             die(f"eklenemedi -- eksik: {address}")
         say(f"  {address} şu an host'ta: {host_driver_of(address)} "
             f"(domain kapalıyken host'undur, bağlamayı libvirt açılışta yapar)")
+        note = nvme_records(a.name).get(address, {})
+        say(f"  kimlik kaydı: {note.get('model') or '?'} "
+            f"{note.get('serial') or '?'} ({note.get('ids') or '?'}) -- "
+            f"başlatmadan önce adresin hâlâ bunu taşıdığı doğrulanır")
         say("Misafir onu boş bir disk olarak görür; bölümlemeyi misafir yapar.")
     return 0
 
@@ -1896,6 +2161,7 @@ def start_for_setup(a, name: str, workdir: Path) -> bool:
     if claims and not confirm_plain_vt(a, name, claims):
         return False
     guard_exclusive_devices(name)
+    guard_nvme_identity(name)
     for addr in sorted(claims):
         say(f"başlamadan önce {addr} -> {host_driver_of(addr)}")
 
@@ -2226,6 +2492,7 @@ def cmd_build(a):
 
     # 5. run it
     guard_exclusive_devices(a.name)
+    guard_nvme_identity(a.name)
     virsh("start", a.name, capture=False)
     press_enter_past_the_cd_prompt(a.name, a.enter_seconds)
 

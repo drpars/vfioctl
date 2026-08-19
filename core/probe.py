@@ -138,6 +138,83 @@ def iommu_active() -> bool:
 
 
 # --------------------------------------------------------------------------- #
+# nvme identity
+# --------------------------------------------------------------------------- #
+
+# 0x0108 is the NVMe programming interface under the mass-storage class. It is
+# the one property of a controller that stays readable no matter which driver
+# holds it, which is why the identity check below leans on it first.
+CLASS_NVME = "0x0108"
+
+
+@dataclass
+class NvmeIdentity:
+    """What a PCI address says it is, at three levels of confidence.
+
+    THE THREE FIELDS ARE NOT READ FROM THE SAME PLACE AND DO NOT SURVIVE THE
+    SAME EVENTS, which is the whole point of keeping them apart:
+
+      * `pci_class` and `ids` come from the PCI config space via sysfs, and the
+        kernel exposes them whichever driver is bound -- including vfio-pci,
+        i.e. while the controller is inside a running guest;
+      * `model` and `serial` come from /sys/.../nvme/nvmeN/, and that directory
+        is created by the *nvme driver*. Hand the controller over and it is
+        gone. Its absence is a normal state, not a fault.
+
+    A check that only knew how to read the serial would therefore go blind at
+    exactly the moment a guest is running, and -- worse -- would read a
+    renumbered address that now holds an Ethernet controller as "cannot tell"
+    rather than as the alarm it is. Measured on this machine: 04:00.0 was an
+    NVMe slot and became an Ethernet controller after a disk was swapped.
+    """
+    address: str
+    present: bool
+    pci_class: str | None        # 0x010802
+    ids: str | None              # c0a9:540a
+    model: str | None            # CT1000P3PSSD8
+    serial: str | None           # 2306E6A91DBB
+
+    @property
+    def is_nvme(self) -> bool:
+        return bool(self.pci_class and self.pci_class.startswith(CLASS_NVME))
+
+
+def nvme_identity(address: str) -> NvmeIdentity:
+    """Read whatever that PCI address will tell us about itself right now.
+
+    Never raises and never writes: an address with no device behind it comes
+    back `present=False` rather than as an exception, because "the slot is
+    empty now" is one of the answers the caller has to be able to act on.
+    """
+    entry = PCI_DEVICES / address
+    if not entry.is_dir():
+        return NvmeIdentity(address, False, None, None, None, None)
+
+    vendor, device = _read(entry / "vendor"), _read(entry / "device")
+    ids = (f"{vendor.removeprefix('0x')}:{device.removeprefix('0x')}"
+           if vendor and device else None)
+
+    model = serial = None
+    nvme_dir = entry / "nvme"
+    if nvme_dir.is_dir():
+        # One controller, but glob rather than assume nvme0: the number is
+        # allocated in probe order and shuffles when disks are added.
+        for controller in sorted(nvme_dir.iterdir()):
+            model = _read(controller / "model")
+            serial = _read(controller / "serial")
+            break
+
+    return NvmeIdentity(
+        address=address,
+        present=True,
+        pci_class=_read(entry / "class"),
+        ids=ids,
+        model=model,
+        serial=serial,
+    )
+
+
+# --------------------------------------------------------------------------- #
 # usb
 # --------------------------------------------------------------------------- #
 
