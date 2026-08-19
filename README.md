@@ -58,7 +58,8 @@ Bunun bir vaat değil bir **kapı** olması tasarımın parçası:
   kurulumu, hiç kurulmamış olmaktan kötüdür.
 - Kapı yazan **her** komutta reddetmez: kurulanı **geri alan** yollar bilerek
   geçer — `uninstall` sorar, kapalıysa söyler ve yine de koşar; `guest clean`
-  hiç sormaz. Yoksa sınıftan düşmüş bir makinede dosyalar mahsur kalırdı.
+  ile `guest eject` hiç sormaz. Yoksa sınıftan düşmüş bir makinede dosyalar,
+  ve bir domain'e bırakılmış kurulum ortamı, mahsur kalırdı.
   Host'un hiçbir şeyini hareket ettirmeyen `build --disk` de sormaz; sınıf dışı
   makinede koşar, yalnızca Looking Glass'ı olmaz. Sorusunun daha sert sahibi
   olan yollar (`guest nvme --attach`, `guest usb`) `inventory`'nin hükmüne
@@ -224,6 +225,32 @@ varsa **misafirin kendi aygıt envanterini** sorar (`Get-PnpDevice`). Aynı
 `vendor:product`'tan iki tane takılıysa devir yapılmaz — libvirt hangisini
 alacağını ayırt edemez.
 
+### Biten kurulum ortamını çıkarmak
+
+```sh
+./vfioctl guest --name win11 eject          # cevap dosyası ISO'sunu çıkar
+./vfioctl guest --name win11 eject --all    # kurulum ISO'sunu ve virtio-win'i de
+```
+
+**Neden bir fiil gerekti.** `build` cevap dosyası ISO'sunu takıyor ve kendisi
+çıkarmıyordu; ölçüldü, bir domain kurulumu bittikten çok sonra hâlâ taşıyordu ve
+aynı domain'de Windows ISO'su **boot order 1**'deydi. İkisi birlikte, sonraki
+açılışta gözetimsiz Setup'ı yeniden koşturabilecek bir tanım demek — ve cevap
+dosyası `DiskID 0`'ı siliyor.
+
+**Ortamı çıkarır, sürücüyü değil.** `<disk device='cdrom'>` yerinde kalır,
+yalnız `<source>` gider — libvirt'te "eject" budur; sürücüyü silmek altındaki
+SATA birimlerini yeniden numaralar ve kurulmuş bir misafir sürücü harflerini
+hatırlar. Boşaltılan sürücü `boot order` taşıyorsa bu **söylenir**: firmware
+sıradaki girdiye geçer.
+
+**Hiçbir dosya silinmez** — ISO'lar yerinde durur; silme `clean`'in işidir. Bu
+yüzden komutun kendi onayı yok: geri takmak `virsh edit` ile tek satır.
+Varsayılan yalnız cevap dosyasını çıkarır, çünkü oraya onu bu araç koydu ve tek
+başına bir açılışı yıkıcı yapan disk odur; kurulum ISO'su ile virtio-win
+kullanıcının seçimi (onarım açılışında işe yarar) ve ancak `--all` ile giderler.
+Domain **kapalı** olmalı ve **bu aracın işaretini** taşımalı.
+
 ### Bütün bir NVMe denetleyicisini misafire vermek
 
 ```sh
@@ -242,11 +269,11 @@ kipi". Denetleyici bir kez oraya yazıldıysa bu komut onu **çıkarmaz**: siste
 diski domain'den ancak domain'le birlikte ayrılır (`clean`).
 
 **Cevap dosyası ISO'su hâlâ takılıysa `--attach` sorar.** ISO'yu `build` takar
-ve hiçbir komut geri çıkarmaz; autounattend `DiskID 0`'ı `WillWipeDisk` ile
-siler ve şablonun kendi gerekçesi *"DiskID 0 domain'deki tek disktir"* —
-ikinci bir fiziksel disk tam da o varsayımı kaldırır. Sıranın ne olacağı bu
-makinede **ölçülmedi**, o yüzden komut reddetmiyor: durumu söylüyor ve
-`build --system-nvme`'nin kullandığı EVET onayını istiyor (terminalsiz koşu
+ve kendisi çıkarmaz — çıkaran komut `guest eject`; autounattend `DiskID 0`'ı
+`WillWipeDisk` ile siler ve şablonun kendi gerekçesi *"DiskID 0 domain'deki tek
+disktir"* — ikinci bir fiziksel disk tam da o varsayımı kaldırır. Sıranın ne
+olacağı bu makinede **ölçülmedi**, o yüzden komut reddetmiyor: durumu söylüyor
+ve `build --system-nvme`'nin kullandığı EVET onayını istiyor (terminalsiz koşu
 için `--confirm-unattended`).
 
 **`--detach` yalnız bu aracın bıraktığı satırı siler.** `managed='no'` kart
@@ -360,6 +387,7 @@ arda beş kez.
 ./vfioctl guest setup          # (kart varsa NVIDIA) → VDD → Looking Glass → tek ekran
 ./vfioctl guest passthrough    # domain'e kartı ver (geri almak: --off)
 ./vfioctl guest nvme --attach 0000:02:00.0   # domain'e NVMe denetleyicisi ver
+./vfioctl guest eject          # biten kurulum ortamını sürücüden çıkar
 ./vfioctl guest setup --start  # domain'i başlat + turu koş (kartlıysa: düz VT)
 ./vfioctl guest status
 ./vfioctl guest clean

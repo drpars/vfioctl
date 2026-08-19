@@ -492,9 +492,10 @@ def gate(profile_name: str | None = None) -> tuple[bool, Profile | None, list[Ch
 
     THREE CLASSES DELIBERATELY DO NOT REFUSE, and they are named in CLAUDE.md
     because a rule with unnamed exceptions goes false at the first one:
-      * the undo -- uninstall asks and says so but goes on, guest clean does
-        not ask; a refusal there strands the files on the machine whose owner
-        wants them gone.
+      * the undo -- uninstall asks and says so but goes on, guest clean and
+        guest eject do not ask; a refusal there strands the files, and the
+        install media left in a domain, on the machine whose owner wants them
+        gone.
       * what moves nothing of the host's -- build --disk, which outside the
         class runs and simply has no Looking Glass.
       * what already answers to a narrower, stricter owner -- both to

@@ -5,6 +5,7 @@
     ./vfioctl guest setup            # push and drive the guest-side scripts
     ./vfioctl guest passthrough      # give the domain the dGPU (or --off)
     ./vfioctl guest nvme             # give the domain a whole NVMe controller
+    ./vfioctl guest eject            # take the finished install media out
     ./vfioctl guest status           # where is it now
     ./vfioctl guest screenshot       # what is on its screen
     ./vfioctl guest autologon        # re-run just the console-session step
@@ -1406,7 +1407,40 @@ def guard_nvme_detach(name: str, address: str, blocks: list[str]) -> None:
 
 
 CDROM_BLOCK = re.compile(r"<disk\b[^>]*device='cdrom'.*?</disk>", re.DOTALL)
-DISK_SOURCE = re.compile(r"<source file='([^']*)'")
+
+
+# The medium inside a CD-ROM drive. Self-closing is what libvirt renders here,
+# but a domain that has run can carry a <seclabel> child, so both shapes are
+# matched -- the line is being deleted, and a half-matched line would leave
+# libvirt an unclosed element.
+CDROM_SOURCE = re.compile(
+    r"[ \t]*<source file='([^']*)'\s*(?:/>|>.*?</source>)\n", re.DOTALL)
+CDROM_TARGET = re.compile(r"<target dev='([^']*)'")
+CDROM_BOOT = re.compile(r"<boot order='([^']*)'")
+
+
+def cdrom_media(xml: str) -> list[tuple[str, str, str, str]]:
+    """(target dev, medium path, boot order or '', block) per loaded CD-ROM.
+
+    A drive with no medium is not listed: it is already ejected, and reporting
+    it as work to do is how a second run of a finished command looks like a
+    failure.
+    """
+    out = []
+    for block in CDROM_BLOCK.findall(xml):
+        source = CDROM_SOURCE.search(block)
+        if not source:
+            continue
+        dev = CDROM_TARGET.search(block)
+        boot = CDROM_BOOT.search(block)
+        out.append((dev.group(1) if dev else "?", source.group(1),
+                    boot.group(1) if boot else "", block))
+    return out
+
+
+def is_answer_file(path: str) -> bool:
+    """Does this medium carry the answer file this tool renders?"""
+    return os.path.basename(path).lower() == "unattend.iso"
 
 
 def answer_file_isos(xml: str) -> list[str]:
@@ -1415,15 +1449,11 @@ def answer_file_isos(xml: str) -> list[str]:
     MATCHED ON THE NAME THIS TOOL GIVES ITS OWN ISO, and that limit is stated
     in the warning rather than hidden: a hand-rolled answer disc called
     something else reads as an ordinary CD-ROM here. What the check is for is
-    the ISO `build` attaches and nothing ever takes back out -- measured on
-    this machine, win11-test still carries it long after its install finished.
+    the ISO `build` attaches and only `guest eject` takes back out -- measured
+    on this machine, win11-test still carried it long after its install had
+    finished, which is why the ejecting verb was written at all.
     """
-    out = []
-    for block in CDROM_BLOCK.findall(xml):
-        m = DISK_SOURCE.search(block)
-        if m and os.path.basename(m.group(1)).lower() == "unattend.iso":
-            out.append(m.group(1))
-    return out
+    return [path for _, path, _, _ in cdrom_media(xml) if is_answer_file(path)]
 
 
 def guard_unattended_answer_file(name: str, xml: str, address: str,
@@ -1439,17 +1469,19 @@ def guard_unattended_answer_file(name: str, xml: str, address: str,
     Setup that drives itself.
 
     WHAT IS KNOWN AND WHAT IS NOT, because the difference decides that this
-    asks rather than refuses. Known: the ISO stays attached forever (nothing
-    here ejects it), and the answer file wipes DiskID 0 -- its own template
-    comment justifies that number with "DiskID 0 is the only disk in the
-    domain", which is the premise --attach removes. Not known: which disk a
+    asks rather than refuses. Known: the ISO stays attached until somebody
+    takes it out -- `build` never does, and `guest eject` is the verb that
+    can -- and the answer file wipes DiskID 0, its own template comment
+    justifying that number with "DiskID 0 is the only disk in the domain",
+    which is the premise --attach removes. Not known: which disk a
     passed-through controller becomes once Setup enumerates them; that is
     exactly what the M1 measurement is for. An absolute refusal would be
-    written on the unknown half, and would block every domain this tool builds,
-    since it is the tool that leaves the ISO there.
+    written on the unknown half, and would still block a freshly built domain,
+    since it is `build` that leaves the ISO there.
 
-    So the state is reported, the unknown is named as unknown, and the same
-    typed confirmation that mode 2 uses decides it.
+    So the state is reported, the unknown is named as unknown, the remedy is
+    now a command rather than a hand edit, and the same typed confirmation
+    that mode 2 uses decides the rest.
     """
     isos = answer_file_isos(xml)
     if not isos:
@@ -1459,8 +1491,8 @@ def guard_unattended_answer_file(name: str, xml: str, address: str,
     say(f"  Setup bir daha koşarsa autounattend DiskID 0'ı WillWipeDisk ile "
         f"siler. {address} eklendikten sonra DiskID sırasının ne olduğu "
         f"ÖLÇÜLMEDİ -- yani bu diskin silinmeyeceği söylenemiyor.")
-    say(f"  Kurulum bittiyse ISO'nun işi de bitmiştir; tanımdan çıkarmak: "
-        f"virsh -c {URI} edit {name} (cdrom bloğu silinir).")
+    say(f"  Kurulum bittiyse ISO'nun işi de bitmiştir; çıkarmak: "
+        f"{self_cmd('guest', '--name', name, 'eject')}")
     say(f"  Denetim adla eşleşir (unattend.iso); başka adla hazırlanmış bir "
         f"cevap diski buradan görünmez.")
     if confirmed:
@@ -3430,6 +3462,90 @@ def report_system_nvme(address: str, note: dict[str, str]) -> None:
         "komutlar demek ve vfioctl bunların hiçbirini bu makinede ölçmedi.")
 
 
+def cmd_eject(a):
+    """Take the finished install media back out of a domain's drives.
+
+    WHY THIS EXISTS AS A VERB. `build` attaches the answer-file ISO and, until
+    now, nothing here ever took it out again -- measured: a domain still
+    carried it long after its install had finished, and on this machine the
+    Windows ISO in the same domain still held boot order 1. Those two together
+    are a definition that re-runs an unattended Setup on the next start, and
+    the answer file wipes DiskID 0. `nvme --attach` had to grow a typed
+    confirmation because of exactly that state; this is the command that ends
+    the state instead of warning about it.
+
+    IT EJECTS THE MEDIUM, NOT THE DRIVE. The <disk device='cdrom'> element
+    stays and loses its <source>, which is what "eject" means to libvirt and
+    what keeps the change one line to undo. Removing the drive would renumber
+    the SATA units under it, and a guest that has already been installed
+    remembers drive letters.
+
+    IT DELETES NOTHING FROM DISK. The ISO files stay where they are -- the
+    Windows one is the user's, and the rendered one belongs to `clean`, which
+    owns removal. So a run of this command is reversible with `virsh edit`, and
+    that is why it needs no confirmation of its own.
+
+    THE DEFAULT IS THE ANSWER FILE ALONE, because that is the disc this tool
+    put there and the only one that makes a start destructive by itself. The
+    install ISO and virtio-win are the user's choice -- useful for a repair
+    boot -- so they go only when --all asks for them.
+    """
+    if not domain_exists(a.name):
+        die(f"'{a.name}' tanımlı değil")
+    # The mark answers "is this domain ours"; editing someone else's definition
+    # is not this tool's business even when the edit is harmless.
+    guard(a.name, None)
+
+    state = domain_state(a.name)
+    if state != "shut off":
+        die(f"'{a.name}' şu an '{state}' -- ortam yalnızca kapalı bir "
+            f"domain'in kalıcı tanımından çıkarılır. Koşan misafirden çıkarmak "
+            f"virsh'in işi: virsh -c {URI} change-media {a.name} <hedef> "
+            f"--eject --live")
+
+    xml = virsh("dumpxml", a.name).stdout
+    media = cdrom_media(xml)
+    if not media:
+        say(f"'{a.name}': ortam taşıyan CD-ROM yok -- yapacak bir şey yok")
+        return 0
+
+    say(f"'{a.name}' CD-ROM'ları:")
+    for dev, path, boot, _ in media:
+        mark = " [cevap dosyası]" if is_answer_file(path) else ""
+        order = f" (boot order {boot})" if boot else ""
+        say(f"  {dev}: {path}{mark}{order}")
+
+    targets = [m for m in media if a.all or is_answer_file(m[1])]
+    if not targets:
+        say("Cevap dosyası ISO'su takılı değil -- çıkarılacak bir şey yok.")
+        say(f"  Kurulum ortamını da çıkarmak: "
+            f"{self_cmd('guest', '--name', a.name, 'eject', '--all')}")
+        return 0
+
+    for dev, path, boot, block in targets:
+        xml = xml.replace(block, CDROM_SOURCE.sub("", block, count=1), 1)
+        if boot:
+            say(f"  {dev} boot order {boot} taşıyordu -- sürücü kalıyor ama "
+                f"boş; firmware sıradaki girdiye geçer")
+
+    redefine(xml)
+
+    # Read back rather than trust the define, the same way the other editors
+    # here do: a define that silently kept the old source would leave the
+    # domain armed while the output said it was disarmed.
+    after = virsh("dumpxml", a.name).stdout
+    left = {path for _, path, _, _ in cdrom_media(after)}
+    for dev, path, _, _ in targets:
+        if path in left:
+            die(f"çıkarılamadı -- {dev} hâlâ {path} taşıyor")
+        say(f"çıkarıldı: {dev} ← {path}")
+    say(f"  işaret: {'duruyor' if marker_of(a.name) else 'YOK -- kaybolmuş'}")
+    say(f"  ivshmem: {'duruyor' if 'mem-path' in after else 'yok'}")
+    say("Dosyalar silinmedi; yalnız tanım boşaltıldı. Geri takmak: "
+        f"virsh -c {URI} edit {a.name}")
+    return 0
+
+
 def cmd_clean(a):
     disk = owned_image(a)
     guard(a.name, disk)
@@ -3577,6 +3693,13 @@ def main(argv: list[str] | None = None) -> int:
                     help="cevap dosyası ISO'su takılıyken de ekle "
                          "(terminalsiz koşu için; EVET sorusunun yerine geçer)")
     nv.set_defaults(func=cmd_nvme)
+
+    ej = sub.add_parser("eject",
+                        help="biten kurulum ortamını sürücülerden çıkar")
+    ej.add_argument("--all", action="store_true",
+                    help="cevap dosyasıyla birlikte kurulum ISO'sunu ve "
+                         "virtio-win'i de çıkar")
+    ej.set_defaults(func=cmd_eject)
 
     pt = sub.add_parser("passthrough", help="kartı domain'e ver ya da geri al")
     pt.add_argument("--off", action="store_true", help="kartı domain'den çıkar")

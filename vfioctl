@@ -24,10 +24,11 @@ undo. install --check asks and only warns, because it writes nothing.
 
 THREE CLASSES DELIBERATELY DO NOT REFUSE, and they are named here because a
 rule with unnamed exceptions goes false at the first one:
-  * the undo -- uninstall asks and says so but goes on, guest clean does not
-    ask. A machine can fall out of class after install already wrote, and
-    refusing then strands this tool's files on the one machine whose owner
-    wants them gone.
+  * the undo -- uninstall asks and says so but goes on, guest clean and
+    guest eject do not ask. A machine can fall out of class after install
+    already wrote, and refusing then strands this tool's files, and the install
+    media it left in a domain, on the one machine whose owner wants them
+    gone.
   * what moves nothing of the host's -- build --disk builds an image and a
     cardless domain. Outside the class it runs and simply has no Looking Glass,
     which ivshmem_parts() says out loud rather than failing over.

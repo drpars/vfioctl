@@ -32,7 +32,7 @@ yol o. `install --check` sorar ve yalnızca **uyarır**, çünkü hiçbir şey y
 yazılmayan muafiyet, kuralı ilk aykırı komutta yalana çevirir:
 
 - **Geri alan yollar** — `uninstall` sorar, söyler ve **yine de koşar**;
-  `guest clean` hiç sormaz. Makine, `install` yazdıktan
+  `guest clean` ve `guest eject` hiç sormaz. Makine, `install` yazdıktan
   *sonra* sınıftan düşebilir (MUX çevrilir, kart başka yuvaya taşınır); red o
   zaman aracın `/etc`'teki dosyalarını tam da onları kaldırmak isteyen makinede
   mahsur bırakır. *Çekirdeğin özniteliği bırakması bu listede değil:*
