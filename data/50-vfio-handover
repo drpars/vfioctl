@@ -430,11 +430,12 @@ nvme_audit() {
 # PCI class alone would wave a SATA or a RAID controller through, and an
 # unrecorded address has nothing for the identity ladder to compare against
 # anyway. The one fact that decides whether a start costs this machine its root
-# filesystem is readable from sysfs alone. Measured on this machine: the tool's
-# own written protocol still named 0000:05:00.0 as the address to check for,
-# from a time when that was the card's GUEST-side slot -- after the disk swap
-# it is the controller carrying /, /home and /efi, and a hand-written hostdev
-# is what would hand it to libvirt with managed='yes'.
+# filesystem is readable from sysfs alone. Measured on this machine:
+# 0000:05:00.0 carries /, /home and /efi, 0000:02:00.0 carries nothing, and a
+# hand-written hostdev naming the first is what would hand it to libvirt with
+# managed='yes'. The written M1 protocol already asks a human to check that,
+# by eye, before the start; what was missing is the machine saying it -- and
+# saying it about a definition that was written before anyone looked.
 #
 # AN EMPTY ANSWER IS NOT "SAFE" AND IS NOT PRINTED AS ONE. An LVM or LUKS root
 # resolves to /sys/devices/virtual/block and has no PCI ancestor to find, so it
