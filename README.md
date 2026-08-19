@@ -201,10 +201,10 @@ Denetleyiciyi **bütün olarak** verir: misafir diski kendi kuyrukları ve kendi
 NVMe ad alanıyla görür, host onu domain koştuğu sürece hiç görmez; bölümlemeyi
 misafir yapar.
 
-**Ama misafiri buraya kuran bir komut bugün yok.** Donanım yolu açık — misafir
-diski yerli NVMe olarak görüyor, ölçüldü — ancak `guest build` sistem diskini
-her zaman bir qcow2 imajına kurar ve bu komut misafire **ikinci** bir disk
-verir. Sıfırdan fiziksel NVMe'ye kurulum yazılmadı.
+**Bu komut misafire ikinci bir disk verir.** Sistem diskini fiziksel bir
+denetleyici yapmak ayrı bir yoldur ve `build`'in bayrağıdır → "İki kurulum
+kipi". Denetleyici bir kez oraya yazıldıysa bu komut onu **çıkarmaz**: sistem
+diski domain'den ancak domain'le birlikte ayrılır (`clean`).
 
 **Hep ya hiç, ve bunu donanım söylüyor.** PCI devri bütün IOMMU grubunu taşır,
 denetleyicinin yarısı diye bir şey yok. Diskin bir kısmı host'ta kalacaksa cevap
@@ -323,6 +323,48 @@ olur, çünkü onu kimse sınamaz. `vfioctl guest --help` kendi yardımını bas
 Bu makinede ölçüldü: boş diskten ajanı ulaşılabilir, konsol oturumu açık bir
 Windows 11 Pro 25H2'ye **7 dk 33 sn**, elle adım yok.
 
+#### İki kurulum kipi — ve ikisi birbirini dışlar
+
+```sh
+./vfioctl guest --name win11-b build --disk ~/.images/win11-b.qcow2 …   # kip 1
+./vfioctl guest --name win11-b build --system-nvme 0000:02:00.0 …        # kip 2
+```
+
+Gerisi birebir aynı: `passthrough`, `setup`, `status`, `clean` iki kipte de aynı
+komutlar. **Değişen tek şey `build`'in satırı** — yeni bir fiil yok, çünkü
+domain tanımlayan ikinci bir kod yolu ikinci bir cevap demek olurdu.
+
+**Bayrak `--disk`'in yerine geçer, yanına değil.** İkisi birden verilirse
+reddedilir: bir domain'in bir sistem diski olur, ve `clean`'in iki hedefi olmaz.
+`--size` de kip 2'de reddedilir — o kip imaj üretmiyor.
+
+**Ölçülen ve ölçülmeyen.** Ölçülen: libvirt `<boot order>`'ı
+`<hostdev managed='yes'>` içinde kabul ediyor ve geri okumada aynı yerde
+duruyor; domain'in `<metadata>`'sı devredilen denetleyicinin kimliğini
+(`model`, `serial`, `ids`) `role="system"` ile birlikte aynen koruyor.
+**Ölçülmeyen: OVMF'in o denetleyiciden gerçekten önyükleyebildiği, ve Windows
+Setup'ın diski `list disk`'te kaçıncı sırada gördüğü.** İkisi de gerçek bir boot
+istiyor ve o tur koşulmadı — bu kip bugün **sınanmamış** bir yoldur.
+
+**Kurulum diski siler, ve son kapı insandır.** Cevap dosyası `DiskID 0`'ı baştan
+bölümlüyor. Envanterin `✓`'i *"host onun üstünde durmuyor"* demektir, **"boş"
+demek değil** — `inventory` diskin içeriğini hiç okumaz, yani veri dolu ama
+bağlı olmayan bir disk de `✓` alır. O yüzden kip 2 diski **model + seri** ile
+yazar ve `EVET` yazılmasını bekler; `--yes` ile geçilir, ve **tty yoksa soru
+sorulamadığı için tur reddedilir** (sorulacak kimse olmaması onay değildir).
+
+**`clean` fiziksel diske dokunmaz.** Domain'i ve çalışma dizinini kaldırır,
+sonra sistem diskinin **kimliğiyle** orada durduğunu ve silinmemesinin bilerek
+olduğunu söyler. Silme komutu **basılmaz**: `wipefs` yalnız imzayı, `blkdiscard`
+bütün namespace'i, `nvme format` LBA boyutunu da değiştirebilir — üçü aynı şey
+değil ve hiçbiri bu makinede ölçülmedi. Ölçülmemiş reçete yazılmaz.
+
+**Sistem diski domain'den ancak domain'le birlikte ayrılır.** `nvme --detach`
+onu **mutlak** reddeder ve bunun bayrağı yoktur: izin verilseydi geriye
+açılmayan bir domain ve hiçbir komutun geri koyamayacağı bir disk kalırdı, çünkü
+boot sırasını yalnız `build --system-nvme` yazar ve o da diski baştan bölümlüyor.
+Çıkış yolu `clean`'dir — diski içeriğine dokunmadan serbest bırakır.
+
 `setup`, `guest/windows/` altındaki betikleri misafire iter ve sırayla koşar.
 Sıra bir bağımlılık: ekran topolojisinin yalıtacak bir şeyi olması için önce
 VDD'nin ekranı doğmalı, VDD'nin render edeceği kartın da adını taşıyabilmesi
@@ -394,8 +436,9 @@ Faz 4'ün iki yarısı birbirinin küçük kardeşi değil, ayrı iki mekanizma.
 **Oturuma bağlı USB devri** koşan misafire ödünç verir, hiçbir yere yazmaz,
 misafir kapanınca geri alınır. **Disk devri** ise kalıcı tanıma ait ve K14'ün sert
 korumasının muhatabı o; misafir denetleyiciyi boş bir disk olarak görür.
-Reddetme yolu envanterde yazılı ve ölçülü. **Sistem diskini fiziksel NVMe yapan
-bir kurulum kipi yok** — `build` her zaman qcow2'ye kurar.
+Reddetme yolu envanterde yazılı ve ölçülü. Sistem diskini fiziksel NVMe yapan
+kurulum kipi (`build --system-nvme`) yazıldı; **gerçek bir boot ile
+ölçülmedi** → "İki kurulum kipi".
 
 Faz 3'ün kabul ölçütü bu makinede karşılandı: kartsız prova ve kartlı tur geçti
 (LG host günlüğü kartı adıyla yazıp `Capture Start` dedi, VDD ekranı 2560x1440),

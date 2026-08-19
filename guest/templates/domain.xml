@@ -14,6 +14,13 @@
       generates them. Hand-written addresses are a conflict waiting for the day
       a <hostdev> gets added.
 
+  ONE TEMPLATE, TWO SYSTEM DISKS. @@SYSTEM@@ below is filled with either a
+  qcow2 disk or a handed-over NVMe controller. The mode-2 shape rests on one
+  measurement and one gap, and both are written down where they are used: a
+  <boot order> inside <hostdev managed='yes'> is accepted by libvirt and
+  survives read-back (measured 2026-08-19, libvirt 12.6.0), while whether OVMF
+  can actually boot the guest off that controller HAS NOT BEEN MEASURED.
+
   WHAT IS DELIBERATELY MISSING, AND WHY. This domain does not passthrough the
   dGPU. The question this round answers is "does autounattend.xml produce a
   booted guest with a reachable agent, and do the three guest scripts run on
@@ -112,12 +119,21 @@
   <devices>
     <emulator>/usr/bin/qemu-system-x86_64</emulator>
 
-    <disk type='file' device='disk'>
-      <driver name='qemu' type='qcow2' cache='none' io='threads' discard='unmap'/>
-      <source file='@@DISK@@'/>
-      <target dev='vda' bus='virtio'/>
-      <boot order='2'/>
-    </disk>
+    <!-- THE SYSTEM DISK, AND WHICH OF THE TWO KINDS IT IS, IS build.py's
+         DECISION. Mode 1 renders a qcow2 the host owns and qemu reads; mode 2
+         renders the NVMe controller itself, handed over whole and carrying its
+         own boot entry. One placeholder rather than two template files: every
+         other line of this domain is identical between the modes, and a second
+         file is a second answer that has to be kept in step by hand.
+
+         WHATEVER LANDS HERE MUST BE THE DOMAIN'S ONLY DISK. The answer file
+         wipes DiskID 0 and installs to it, which is correct only while the
+         guest sees exactly one; the CD-ROMs are not disks. In mode 1 that
+         holds by construction, because build.py creates the image a few lines
+         before it defines this. In mode 2 the single disk is hardware, so
+         build.py reads the defined domain back and refuses the round rather
+         than trusting this comment. -->
+@@SYSTEM@@
 
     <!-- Boot order 1. The firmware's "Press any key to boot from CD" window is
          what guest/build.py spends its first seconds answering; after that

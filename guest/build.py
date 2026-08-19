@@ -80,6 +80,17 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 TEMPLATES = HERE / "templates"
 IMAGES = Path.home() / ".images"
+
+# The image `--disk` falls back to. It is a fixed name and not one derived from
+# --name, which is why owned_image() asks the domain first and reaches this
+# only when there is no domain to ask.
+DEFAULT_DISK = IMAGES / "win11-test.qcow2"
+
+# The size `--size` falls back to. It is a fallback and not an argparse default
+# so that giving the flag stays distinguishable from not giving it -- mode 2
+# creates no image and has to refuse a size rather than ignore one.
+DEFAULT_SIZE = "64G"
+
 URI = "qemu:///system"
 PCI_DEVICES = Path("/sys/bus/pci/devices")
 
@@ -297,6 +308,24 @@ def write_marker(name: str, root) -> None:
 
 NVME_RECORD = "nvme"
 
+# The one role a recorded controller can carry. Its ABSENCE is the common case
+# and means "data disk", so every record written before this attribute existed
+# stays valid and nothing has to be migrated.
+#
+# WHY IT LIVES ON <nvme> AND NOT ON <built-by>, which is where an earlier round
+# decided to put it. <built-by> answers "did this tool produce this domain",
+# and guard() reads it to decide whether a destructive step may run. Hanging a
+# disk identity off that element welds two independent facts together -- and
+# the seam is not theoretical: `nvme --attach` is allowed to write an identity
+# into a domain we did NOT build, because lending a data disk to a hand-made
+# guest is the feature's only real target. As an attribute of <built-by> that
+# case either cannot be recorded at all, or records it by marking a foreign
+# domain as ours -- the same defect marker_of() was fixed for on 2026-08-19,
+# coming back through the other door. On <nvme> the two facts stay apart, and
+# the identity is already structured here (ids, model, serial as three
+# comparable fields) instead of one by-id string that has to be parsed.
+NVME_ROLE_SYSTEM = "system"
+
 # What a check can conclude. Only MISMATCH and ABSENT are faults; OPAQUE is the
 # normal state of a controller that is inside a running guest, and UNRECORDED
 # is the normal state of a domain edited before this record existed.
@@ -346,7 +375,7 @@ def nvme_records(name: str) -> dict[str, dict[str, str]]:
     return out
 
 
-def record_nvme(name: str, ident) -> None:
+def record_nvme(name: str, ident, role: str | None = None) -> None:
     """Write down what the drive at this address is, replacing any older note."""
     root = marker_block(name)
     if root is None:
@@ -360,7 +389,28 @@ def record_nvme(name: str, ident) -> None:
         value = getattr(ident, key)
         if value:
             element.set(key, value)
+    if role:
+        element.set("role", role)
     write_marker(name, root)
+
+
+def system_nvme_of(name: str) -> tuple[str, dict[str, str]] | None:
+    """The controller this domain boots from, per its own record, or None.
+
+    THIS IS THE ONE FACT THE DOMAIN XML CANNOT DERIVE FROM ITSELF. A <hostdev>
+    says the guest gets a controller; it does not say the guest's operating
+    system is on it. Two commands need the difference and neither can guess it:
+    `nvme --detach` must refuse the system disk, and `clean` must say the
+    system is still sitting on hardware it did not touch.
+
+    A boot order inside the hostdev would be a tempting substitute and it is
+    the wrong one -- it says which device the firmware tries first, which is a
+    true statement about an empty drive as well.
+    """
+    for address, note in sorted(nvme_records(name).items()):
+        if note.get("role") == NVME_ROLE_SYSTEM:
+            return address, note
+    return None
 
 
 def forget_nvme(name: str, address: str) -> None:
@@ -480,6 +530,57 @@ def domain_disks(name: str) -> set[Path]:
     return paths
 
 
+def guest_disks(name: str) -> tuple[list[str], list[str]]:
+    """What the defined guest will see as disks: image files, NVMe controllers.
+
+    CD-ROMs are excluded because the answer file's DiskID numbering excludes
+    them, and that numbering is what this exists to reason about.
+    """
+    images: list[str] = []
+    r = virsh("dumpxml", name, check=False)
+    if r.returncode == 0:
+        try:
+            root = ElementTree.fromstring(r.stdout)
+        except ElementTree.ParseError:
+            root = None
+        if root is not None:
+            for element in root.findall("./devices/disk"):
+                if element.get("device") != "disk":
+                    continue
+                source = element.find("source")
+                if source is not None:
+                    images.append(source.get("file") or source.get("dev") or "?")
+    return images, sorted(c for c in pci_claims(name) if _is_nvme(c))
+
+
+def domain_system_image(name: str) -> Path | None:
+    """The image file the domain itself calls its disk, if it has one."""
+    images, _ = guest_disks(name)
+    return Path(images[0]).resolve() if images else None
+
+
+def owned_image(a) -> Path | None:
+    """The qcow2 this invocation may act on, or None when there is none.
+
+    ASK THE DOMAIN BEFORE FALLING BACK TO THE FLAG'S DEFAULT, because the
+    default is a fixed path (win11-test.qcow2) and not something derived from
+    --name. Mode 2 made that reachable: a domain whose system disk is a
+    physical controller has no image at all, and a `clean` that still went by
+    the default would delete a file belonging to a different guest -- while a
+    `passthrough` would refuse itself, because that same file is claimed by the
+    domain it actually belongs to.
+
+    The default stays as the last answer rather than being removed: a round
+    that died between `qemu-img create` and `define` leaves an image with no
+    domain to ask, and finishing that clean-up is what `clean` is for.
+    """
+    if a.disk:
+        return Path(a.disk)
+    if domain_exists(a.name):
+        return domain_system_image(a.name)
+    return DEFAULT_DISK
+
+
 def defined_domains() -> list[str]:
     r = virsh("list", "--all", "--name", check=False)
     return [n for n in r.stdout.split() if n] if r.returncode == 0 else []
@@ -492,7 +593,7 @@ def disk_claimants(disk: Path, exclude: str) -> list[str]:
             if d != exclude and target in domain_disks(d)]
 
 
-def guard(name: str, disk: Path):
+def guard(name: str, disk: Path | None):
     """Refuse a destructive run unless we can show the target is ours.
 
     Two closed sides, and each catches what the other cannot. The mark answers
@@ -505,10 +606,16 @@ def guard(name: str, disk: Path):
     references, with no domain defined for it. That is a half-finished round --
     build creates the disk before it defines the domain -- and refusing it would
     leave `clean` unable to finish the job it exists for.
+
+    `disk` is None for a mode-2 domain, whose system disk is a controller and
+    not a file. Only the image half goes quiet: the mark still answers, and it
+    is the half that decides whether a destructive step may run at all.
     """
     if domain_exists(name) and marker_of(name) is None:
         die(f"'{name}' bu betiğin ürettiği bir domain değil (işaret yok) -- "
             f"yıkıcı hiçbir adım ona uygulanmaz.")
+    if disk is None:
+        return
     claimants = disk_claimants(disk, exclude=name)
     if claimants:
         die(f"'{disk}' başka bir domain'in diski ({', '.join(claimants)}) -- "
@@ -774,8 +881,7 @@ def cmd_passthrough(a):
     and re-serialising all of them to change two is how one of them quietly
     comes back different. What changed is read back from libvirt afterwards.
     """
-    disk = Path(a.disk)
-    guard(a.name, disk)
+    guard(a.name, owned_image(a))
     if not domain_exists(a.name):
         die(f"'{a.name}' tanımlı değil")
     state = domain_state(a.name)
@@ -894,8 +1000,33 @@ NVME_HOSTDEV_XML = """    <hostdev mode='subsystem' type='pci' managed='yes'>
         <address domain='0x{domain:04x}' bus='0x{bus:02x}' \
 slot='0x{slot:02x}' function='0x{function:x}'/>
       </source>
-    </hostdev>
+{boot}    </hostdev>
 """
+
+# Mode 2's one extra line. MEASURED, not assumed: libvirt 12.6.0 accepts a
+# <boot order> inside <hostdev managed='yes'> and hands it back in the same
+# place on dumpxml (2026-08-19, on a throwaway domain). What that measurement
+# does NOT say is that OVMF can boot a guest off the controller -- that is a
+# separate round with a real boot in it, and it has not been run.
+NVME_BOOT_XML = "      <boot order='2'/>\n"
+
+# The qcow2 half of the same slot. It is the block that used to sit in the
+# template verbatim; it moved here when the template gained @@SYSTEM@@, so that
+# the two kinds of system disk are written side by side instead of one being a
+# file and the other a string.
+SYSTEM_DISK_XML = """    <disk type='file' device='disk'>
+      <driver name='qemu' type='qcow2' cache='none' io='threads' discard='unmap'/>
+      <source file='{disk}'/>
+      <target dev='vda' bus='virtio'/>
+      <boot order='2'/>
+    </disk>
+"""
+
+
+def nvme_hostdev_xml(address: str, *, bootable: bool = False) -> str:
+    """The <hostdev> for one controller; bootable only in mode 2."""
+    return NVME_HOSTDEV_XML.format(boot=NVME_BOOT_XML if bootable else "",
+                                   **address_parts(address))
 
 
 def nvme_item(address: str):
@@ -920,6 +1051,40 @@ def nvme_item(address: str):
             return item, inventory
     die(f"{address} bu makinede bir PCI cihazı değil. "
         f"Ne var: {self_cmd('inventory')}")
+
+
+def nvme_candidate(address: str):
+    """K14's gate for one controller: print the verdict, refuse a REFUSE.
+
+    IT MOVED OUT OF cmd_nvme BECAUSE A SECOND CALLER ARRIVED, and the second
+    one raises the stakes rather than repeating them. `nvme --attach`
+    authorises an XML line; `build --system-nvme` authorises an unattended
+    install that partitions the drive. The question underneath is the same --
+    is the host standing on this disk -- and core.inventory owns the answer. A
+    copy of the gate in the build path would be the copy that drifted, and the
+    direction it drifts in is "let a mounted disk through".
+
+    WHAT THIS GATE DOES NOT ANSWER, and the build path says so in its own
+    words: `✓` means the host is not standing on the drive, NOT that the drive
+    is empty. inventory never reads disk content -- no blkid, no wipefs -- so a
+    full-but-unmounted disk passes here exactly like a blank one.
+    """
+    item, inv = nvme_item(address)
+    # The subcommand's name is a promise about what moves. Without this the
+    # verdict alone would let a Wi-Fi card through, because inventory rightly
+    # judges it "uyarı" and not "red" -- a true answer to a question neither
+    # caller is asking.
+    if not _is_nvme(address):
+        die(f"{address} bir NVMe denetleyicisi değil ({item.title}). "
+            f"Bu komut yalnızca depolama denetleyicisi devreder.")
+    say(f"{item.ids} — {item.title} (grup {item.group or '?'}, "
+        f"host sürücüsü {item.driver})")
+    for reason in item.reasons:
+        say(f"  {reason}")
+    if item.verdict == inv.REFUSE:
+        die(f"{address} devredilemez -- yukarıdaki gerekçe. "
+            f"Bu K14'ün sert koruması ve bayrağı yoktur.")
+    return item
 
 
 def cmd_nvme(a):
@@ -973,33 +1138,34 @@ def cmd_nvme(a):
     blocks = [b for b in HOSTDEV_BLOCK.findall(xml) if _matches(b, address)]
 
     if a.detach:
+        system = system_nvme_of(a.name)
+        if system and system[0] == address:
+            note = system[1]
+            ident = " ".join(x for x in (note.get("model"),
+                                         note.get("serial")) if x)
+            ident = ident or "kimlik kaydı eksik"
+            die(f"{address} '{a.name}'in SİSTEM DİSKİ ({ident}) -- "
+                f"çıkarılmıyor, ve bunun bayrağı yok.\n"
+                f"  Çıkarılsaydı geriye ileri yolu olmayan bir durum kalırdı: "
+                f"açılmayan bir domain, artı hiçbir komutun geri koyamayacağı "
+                f"bir disk. Boot sırasını yalnız 'build --system-nvme' yazar "
+                f"ve o da diski baştan bölümlüyor; --attach denetleyiciyi geri "
+                f"koyar ama boot sırasını yazmaz.\n"
+                f"  Sistem diski domain'den ancak domain'le birlikte ayrılır: "
+                f"{self_cmd('guest', '--name', a.name, 'clean')} domain'i "
+                f"kaldırır ve diski içeriğine dokunmadan serbest bırakır.")
         if not blocks:
             say(f"'{a.name}' zaten {address}'i almıyor -- değişiklik yok")
             return 0
         for block in blocks:
             xml = xml.replace(block, "", 1)
     else:
-        item, inv = nvme_item(address)
-        # The subcommand's name is a promise about what moves. Without this the
-        # verdict alone would let a Wi-Fi card through `nvme --attach`, because
-        # inventory rightly judges it "uyarı" and not "red" -- a true answer to
-        # a question this command is not asking.
-        if not _is_nvme(address):
-            die(f"{address} bir NVMe denetleyicisi değil ({item.title}). "
-                f"Bu komut yalnızca depolama denetleyicisi devreder.")
-        say(f"{item.ids} — {item.title} (grup {item.group or '?'}, "
-            f"host sürücüsü {item.driver})")
-        for reason in item.reasons:
-            say(f"  {reason}")
-        if item.verdict == inv.REFUSE:
-            die(f"{address} devredilemez -- yukarıdaki gerekçe. "
-                f"Bu K14'ün sert koruması ve bayrağı yoktur.")
+        nvme_candidate(address)
         if blocks:
             say(f"'{a.name}' {address}'i zaten alıyor -- değişiklik yok")
             return 0
         xml = xml.replace("  </devices>",
-                          NVME_HOSTDEV_XML.format(**address_parts(address))
-                          + "  </devices>", 1)
+                          nvme_hostdev_xml(address) + "  </devices>", 1)
 
     redefine(xml)
 
@@ -2407,11 +2573,106 @@ def guest_setup(a, name: str) -> int:
 # subcommands
 # --------------------------------------------------------------------------- #
 
+def guard_one_disk(name: str, address: str) -> None:
+    """Read the defined domain back: a mode-2 guest must see exactly one disk.
+
+    THE ANSWER FILE WIPES DiskID 0 AND INSTALLS TO IT. In mode 1 that single
+    disk is a qcow2 this command created seconds earlier, so being wrong costs
+    a file the round owns. In mode 2 it is somebody's hardware, so the claim is
+    read back from libvirt rather than inferred from the arguments: a stray
+    <disk> or a second NVMe controller turns DiskID 0 into a coin toss with a
+    real drive on each side.
+
+    WHICH DISK DiskID 0 ACTUALLY IS remains unmeasured -- that needs a real
+    boot, and this tool has not had one on this path. What the check buys is
+    that the question has exactly one possible answer.
+    """
+    images, controllers = guest_disks(name)
+    if images or controllers != [address]:
+        die(f"'{name}' kip 2 için beklendiği gibi tanımlanmadı -- misafirin "
+            f"göreceği diskler: imaj {images or '(yok)'}, denetleyici "
+            f"{controllers or '(yok)'}; beklenen yalnız {address}. Cevap "
+            f"dosyası DiskID 0'ı baştan bölümlüyor, o yüzden tur "
+            f"başlatılmıyor. Domain tanımlı kaldı: "
+            f"{self_cmd('guest', '--name', name, 'clean')}")
+
+
+def system_nvme_target(a, address: str):
+    """K14's gate, the identity that gets recorded, and the one human check.
+
+    THE CONFIRMATION IS NOT CEREMONY, AND THE GATE ABOVE IT IS EXACTLY WHY IT
+    IS STILL NEEDED. core.inventory refuses a controller the host is standing
+    on -- mounted, in fstab, swap -- and that is the whole of what it can
+    honestly answer, because it never reads disk content: no blkid, no wipefs,
+    no filesystem type anywhere in that module. A drive that is full of
+    somebody's data and merely not mounted collects the same `✓`, with the same
+    empty list of reasons. So the last thing standing between an unattended
+    install and that data is a person reading back the model and serial of the
+    drive about to be partitioned.
+
+    A MISSING TTY IS A REFUSAL, NOT A YES -- the same rule confirm_plain_vt was
+    fixed to follow. --yes is how consent is given; nobody being there to ask
+    is not consent.
+
+    THE SERIAL IS REQUIRED, not merely nice to have. Mode 2's whole protection
+    is a recorded identity that a later start compares against reality, and an
+    identity with no serial cannot do that job. It reads as None while the
+    controller is on vfio-pci, which is the honest answer to "some other guest
+    has it right now".
+    """
+    item = nvme_candidate(address)
+
+    sys.path.insert(0, str(HERE.parent))
+    from core import probe
+    ident = probe.nvme_identity(address)
+    if not ident.serial:
+        die(f"{address}'in serisi okunamıyor (host sürücüsü: {item.driver}) "
+            f"-- kip 2'nin koruması kimlik kaydına dayanıyor, kimliksiz "
+            f"yazılmaz. Denetleyici vfio-pci'de ya da koşan bir misafirde "
+            f"olabilir; domain kapanınca host'a döner.")
+
+    say(f"sistem diski olacak: {ident.model} {ident.serial} ({ident.ids}) "
+        f"@ {address}")
+    say("  BU TUR O DİSKE KURAR: cevap dosyası DiskID 0'ı baştan bölümlüyor, "
+        "üstünde ne varsa gider.")
+    say(f"  envanterin `✓`'i \"host onun üstünde durmuyor\" demektir, "
+        f"\"boş\" demek değil -- {self_cmd('inventory')} diskin içeriğini "
+        f"hiç okumaz.")
+
+    if getattr(a, "yes", False):
+        return ident
+    deliberate = self_cmd(*sys.argv[1:], "--yes")
+    if not sys.stdin.isatty():
+        die(f"onay sorulacak bir terminal yok. Bilerek isteniyorsa: "
+            f"{deliberate}")
+    if input(f"  Silinecek disk: {ident.model} {ident.serial}. "
+             f"Onaylamak için EVET yazın > ").strip() != "EVET":
+        die("onaylanmadı -- hiçbir şey yapılmadı.")
+    return ident
+
+
 def cmd_build(a):
-    disk = Path(a.disk)
+    # WHICH KIND OF SYSTEM DISK, AND WHY THE TWO CANNOT BE COMBINED. A domain
+    # has one system disk; offering both flags at once would leave `clean` with
+    # two candidates and no way to tell which one the guest boots from -- and
+    # the answer file, which wipes DiskID 0, with two drives to choose between.
+    system_nvme = (a.system_nvme or "").lower()
+    if system_nvme:
+        if a.disk:
+            die("--system-nvme ile --disk birlikte verilmez: ikisi de sistem "
+                "diskini seçiyor ve bir domain'in bir sistem diski olur.")
+        if a.size:
+            die("--system-nvme kipinde --size'ın karşılığı yok -- bu tur imaj "
+                "üretmiyor, var olan bir denetleyiciyi devrediyor. Boyutu "
+                "diskin kendisi söyler, bölümlemeyi misafirin kurulumu yapar.")
+        address_parts(system_nvme)   # refuses a malformed address before anything
+
+    disk = None if system_nvme else Path(a.disk or DEFAULT_DISK)
     guard(a.name, disk)
 
-    for tool in ("xorriso", "qemu-img", "virsh"):
+    # qemu-img is mode 1's tool: mode 2 creates no image.
+    for tool in (("xorriso", "virsh") if system_nvme
+                 else ("xorriso", "qemu-img", "virsh")):
         if not shutil.which(tool):
             die(f"'{tool}' bulunamadı")
 
@@ -2420,6 +2681,11 @@ def cmd_build(a):
     for iso in (win_iso, virtio_iso):
         if not iso.is_file():
             die(f"ISO yok: {iso}")
+
+    # Before the password prompt, not after: the round's irreversible half is
+    # the drive, and a question asked after somebody has typed a password is a
+    # question asked of somebody already committed.
+    ident = system_nvme_target(a, system_nvme) if system_nvme else None
 
     # Credentials are collected before anything is destroyed, and not only to
     # fail fast: --force wipes the work directory, which is a perfectly sensible
@@ -2467,11 +2733,18 @@ def cmd_build(a):
     # 2. helper ISO
     build_unattend_iso(workdir, xml, unattend_iso)
 
-    # 3. blank disk
-    disk.parent.mkdir(parents=True, exist_ok=True)
-    disk.unlink(missing_ok=True)
-    run(["qemu-img", "create", "-f", "qcow2", str(disk), a.size])
-    say(f"disk imajı: {disk} ({a.size}, seyrek)")
+    # 3. the system disk. Mode 2 has nothing to create -- the drive exists,
+    #    which is the point of the mode.
+    if disk is None:
+        system_block = nvme_hostdev_xml(system_nvme, bootable=True)
+        say(f"sistem diski devrediliyor: {system_nvme} (imaj üretilmiyor)")
+    else:
+        disk.parent.mkdir(parents=True, exist_ok=True)
+        disk.unlink(missing_ok=True)
+        run(["qemu-img", "create", "-f", "qcow2", str(disk),
+             a.size or DEFAULT_SIZE])
+        say(f"disk imajı: {disk} ({a.size or DEFAULT_SIZE}, seyrek)")
+        system_block = SYSTEM_DISK_XML.format(disk=disk)
 
     # 4. define
     qemu_ns, ivshmem = ivshmem_parts()
@@ -2482,13 +2755,24 @@ def cmd_build(a):
         "MEMORY_KIB": a.memory * 1024,
         "VCPU": a.vcpu,
         "CORES": a.vcpu // 2,
-        "DISK": disk,
+        "SYSTEM": system_block.rstrip("\n"),
         "WINISO": win_iso,
         "VIRTIOISO": virtio_iso,
         "UNATTENDISO": unattend_iso,
     })
     redefine(dom_xml)
     say(f"domain tanımlandı: {a.name}")
+
+    if system_nvme:
+        # AFTER the define and never before: `define` replaces the stored XML
+        # with the text it is handed, so a metadata write made first is read,
+        # edited around and written back out of an older copy -- i.e. silently
+        # undone. The same measured order `nvme --attach` follows.
+        record_nvme(a.name, ident, role=NVME_ROLE_SYSTEM)
+        guard_one_disk(a.name, system_nvme)
+        say(f"  kimlik kaydı: {ident.model} {ident.serial} ({ident.ids}) "
+            f"role={NVME_ROLE_SYSTEM} -- her başlatmadan önce adresin hâlâ "
+            f"bunu taşıdığı doğrulanır")
 
     # 5. run it
     guard_exclusive_devices(a.name)
@@ -2625,9 +2909,41 @@ def cmd_autologon(a):
     return 0
 
 
+def report_system_nvme(address: str, note: dict[str, str]) -> None:
+    """Say what is still on the drive, and that not wiping it was a decision.
+
+    NO WIPE COMMAND IS PRINTED, AND THAT OVERTURNS AN EARLIER DECISION RATHER
+    THAN FORGETTING IT. The precedent elsewhere in this tool -- measure the
+    missing half, print the command, do not run it -- was written for
+    installing a package, which is reversible. None of the three primitives a
+    reader would reach for here has been measured on this machine, and they do
+    not mean the same thing: `wipefs` clears signatures, `blkdiscard` goes at
+    the whole namespace, `nvme format` can change the LBA size on the way. An
+    unmeasured recipe is the one thing this workspace does not write down, and
+    the cost of the wrong one on the wrong device cannot be taken back.
+
+    IT REPORTS AN IDENTITY AND NOT AN ADDRESS, for the same reason the record
+    holds one: by the time somebody reads this line and goes looking for the
+    drive, the numbering may have moved. Model and serial survive that.
+    """
+    ident = " ".join(x for x in (note.get("model"), note.get("serial")) if x)
+    say(f"sistem diski {address} üzerinde DURUYOR: "
+        f"{ident or '(kimlik kaydı eksik)'}")
+    say("  bu komut donanıma yazmadı -- disk domain'le birlikte serbest kaldı, "
+        "içeriği olduğu gibi duruyor. Silinmemesi bilerekti.")
+    say("  silmek istenirse bu kullanıcının kendi adımıdır: yalnız imzayı mı, "
+        "bütün namespace'i mi, yoksa biçimlendirmeyi mi kastettiği farklı "
+        "komutlar demek ve vfioctl bunların hiçbirini bu makinede ölçmedi.")
+
+
 def cmd_clean(a):
-    disk = Path(a.disk)
+    disk = owned_image(a)
     guard(a.name, disk)
+
+    # Read before removing. The record is the only place that says this guest's
+    # operating system is on a controller, and `undefine` takes it away with
+    # the domain -- after that the drive is a disk nobody can name.
+    system = system_nvme_of(a.name) if domain_exists(a.name) else None
 
     if domain_exists(a.name):
         if domain_state(a.name) != "shut off":
@@ -2637,7 +2953,7 @@ def cmd_clean(a):
         virsh("undefine", a.name, "--nvram", check=False, capture=False)
         say(f"domain kaldırıldı: {a.name}")
 
-    if disk.exists():
+    if disk is not None and disk.exists():
         disk.unlink()
         say(f"disk silindi: {disk}")
 
@@ -2645,6 +2961,9 @@ def cmd_clean(a):
     if workdir.exists():
         shutil.rmtree(workdir)
         say(f"çalışma dizini silindi: {workdir}")
+
+    if system:
+        report_system_nvme(*system)
     return 0
 
 
@@ -2675,14 +2994,25 @@ def main(argv: list[str] | None = None) -> int:
     )
     p.add_argument("--name", default="win11-test",
                    help="domain adı (varsayılan: win11-test)")
-    p.add_argument("--disk", default=str(IMAGES / "win11-test.qcow2"))
+    # No argparse default: an explicitly given --disk has to stay
+    # distinguishable from an absent one, because mode 2 refuses the
+    # combination and `clean` asks the domain before falling back. The
+    # fallback itself is DEFAULT_DISK, resolved in owned_image().
+    p.add_argument("--disk", default="",
+                   help=f"sistem diski imajı (varsayılan: {DEFAULT_DISK}; "
+                        f"domain tanımlıysa önce onunki sorulur)")
 
     sub = p.add_subparsers(dest="cmd", required=True)
 
     b = sub.add_parser("build", help="baştan sona bir tur koş")
     b.add_argument("--win-iso", default="", help="Windows kurulum ISO'su")
     b.add_argument("--virtio-iso", default=str(DEFAULT_VIRTIO_ISO))
-    b.add_argument("--size", default="64G")
+    b.add_argument("--size", default="",
+                   help=f"qcow2 boyutu (varsayılan: {DEFAULT_SIZE}; "
+                        f"--system-nvme ile birlikte verilemez)")
+    b.add_argument("--system-nvme", metavar="PCI", default="",
+                   help="sistem diski qcow2 değil bu NVMe denetleyicisi olsun "
+                        "(kip 2; --disk ve --size ile birlikte verilmez)")
     b.add_argument("--memory", type=int, default=8192, help="MiB")
     b.add_argument("--vcpu", type=int, default=8)
     b.add_argument("--locale", default="tr-TR")
@@ -2700,6 +3030,8 @@ def main(argv: list[str] | None = None) -> int:
                    help="tanımlıysa önce temizle")
     b.add_argument("--setup", action="store_true",
                    help="tur bitince misafir betiklerini de sür")
+    b.add_argument("--yes", action="store_true",
+                   help="--system-nvme'nin disk onayını sorma")
     b.add_argument("--gpu-name", default="",
                    help="VDD'nin render edeceği bağdaştırıcı (boşsa misafirde keşfedilir)")
     b.set_defaults(func=cmd_build)
