@@ -86,6 +86,17 @@ detaches itself. The refusal is written against the XML rather than against the
 hardware on purpose, so that it still holds when the drive behind an address
 has gone missing -- which is the state --detach exists to repair.
 
+`managed` NAMES THE BINDER, NOT THE WRITER, so a second refusal sits behind it:
+another tool attaching a NIC writes managed='yes' too, and the address match
+alone would have deleted it. Ours is claimed by either of two signs, and either
+one alone is enough -- an identity record under our marker, which survives the
+drive being swapped for something else, or an address that still carries an
+NVMe controller, which survives the record being lost. An address carrying
+nothing at all stays ours to clean, because a stranger's device cannot be the
+one that is missing. Only the state where both signs fail and something live
+and non-storage sits there is refused, and the refusal names `virsh edit`,
+which is the same repair either way round.
+
 NOTHING PERSONAL REACHES THE REPOSITORY. The account name, the password, the
 locale and the ISO path are asked at run time or passed as flags; the rendered
 autounattend.xml and the helper ISO are written to a 0700 directory under
@@ -1337,15 +1348,61 @@ def guard_nvme_detach(name: str, address: str, blocks: list[str]) -> None:
     `blocks` drops the flow into the "not taking it anyway" branch, and that
     prints a success message about a device the domain visibly does take.
     """
-    if all(_managed(b) for b in blocks):
+    if not blocks:
+        # Nothing to delete. Said out loud rather than left to `all([])`,
+        # because the checks added below must not reach an address the domain
+        # does not take: the caller answers that with "değişiklik yok" and
+        # returns 0, and turning that no-op into a death would make
+        # `--detach <an address that moved>` unsafe to type -- which is one of
+        # the two shapes this command exists to repair.
         return
-    die(f"{address} bu domain'de managed='no' yazılmış bir hostdev -- onu "
+
+    if not all(_managed(b) for b in blocks):
+        die(f"{address} bu domain'de managed='no' yazılmış bir hostdev -- onu "
         f"libvirt değil devir hook'u bağlıyor. Kart böyle yazılır (K8) ve bu "
         f"komut ona dokunmaz.\n"
         f"  Kartı domain'den çıkarmak: "
         f"{self_cmd('guest', '--name', name, 'passthrough', '--off')} -- o, "
         f"kartın iki işlevini birlikte alır. Yalnız birini silmek misafire "
         f"GPU'suz bir ses işlevi bırakır, hook devri yine de yapar.")
+
+    # THE SECOND STRANGER, AND WHY managed ALONE DOES NOT NAME IT. `managed`
+    # separates the card from a controller libvirt binds; it says nothing about
+    # WHO wrote the block. virt-manager attaching a NIC writes managed='yes'
+    # too, and this command would have deleted it on the strength of the
+    # address matching.
+    #
+    # TWO SIGNS OF OURS, AND EITHER ONE IS ENOUGH -- that is what keeps the
+    # repair paths open, and they are the reason the check was not written the
+    # obvious way (as _is_nvme, the way --attach asks):
+    #   * a record under our marker names the address, which survives the drive
+    #     being replaced by something else, and
+    #   * the address still carries an NVMe controller, which survives the
+    #     record being lost with the marker.
+    # An address carrying NOTHING is ours to clean too: a stranger's device
+    # cannot be the thing that is missing, and a stale line pointing at a
+    # pulled drive is precisely what --detach is for.
+    #
+    # WHAT IS LEFT IS THE ONE STATE THIS CANNOT TELL APART -- no record AND a
+    # live device that is not a disk -- and it refuses there rather than
+    # guessing, because the two costs are not equal in kind but they are in
+    # remedy: `virsh edit` puts back a wrongly deleted NIC and removes a
+    # wrongly kept line, and it is named in the refusal for exactly that.
+    if address in nvme_records(name):
+        return
+    device = pci_function(address)
+    if device is None or _is_nvme(address):
+        return
+    die(f"{address} bu domain'de managed='yes' bir hostdev, ama bu aracın "
+        f"yazdığına dair iz yok: kimlik kaydı yok, ve adres şu an NVMe "
+        f"denetleyicisi değil ({device.ids}, sınıf {device.pci_class}, host "
+        f"sürücüsü {device.driver or '(yok)'}).\n"
+        f"  Başka bir aracın taktığı cihaz -- virt-manager'ın ağ kartı gibi -- "
+        f"tam böyle görünür, ve bu komut onu silmez: adı NVMe devridir.\n"
+        f"  Gerçekten bu aracın bıraktığı bayat bir satırsa elle silinir: "
+        f"virsh -c {URI} edit {name}.\n"
+        f"  Kaydı duran ya da adresinde hâlâ bir NVMe olan satırlar bu redde "
+        f"takılmaz; adreste hiçbir cihaz yoksa da takılmaz.")
 
 
 def cmd_nvme(a):
@@ -1500,15 +1557,26 @@ def cmd_nvme(a):
     return 0
 
 
-def _is_nvme(address: str) -> bool:
-    """Is that PCI function an NVMe controller on this machine right now?"""
+def pci_function(address: str):
+    """The PCI function sitting at this address right now, or None.
+
+    SPLIT OUT OF _is_nvme BECAUSE "no" HAS TWO MEANINGS AND ONE CALLER NEEDS
+    THEM APART. A False from _is_nvme covers both "that address carries
+    something else" and "there is nothing at that address at all", and those
+    two are exactly the difference between a stranger's live device and a line
+    of ours whose drive has been pulled -- see guard_nvme_detach.
+    """
     if str(HERE.parent) not in sys.path:
         sys.path.insert(0, str(HERE.parent))
     from core import probe
-    for device in probe.read_machine().devices:
-        if device.address == address:
-            return device.pci_class.startswith("0x0108")
-    return False
+    return next((d for d in probe.read_machine().devices
+                 if d.address == address), None)
+
+
+def _is_nvme(address: str) -> bool:
+    """Is that PCI function an NVMe controller on this machine right now?"""
+    device = pci_function(address)
+    return device is not None and device.pci_class.startswith("0x0108")
 
 
 # --------------------------------------------------------------------------- #
