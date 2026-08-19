@@ -2324,7 +2324,15 @@ def start_for_setup(a, name: str, workdir: Path) -> bool:
         return False
 
     claims = pci_claims(name)
-    if claims and not confirm_plain_vt(a, name, claims):
+    # WHICH CLAIMS ACTUALLY PUT THE SESSION AT RISK, and until mode 2 the
+    # question did not need asking: every PCI function a domain took was the
+    # card or its audio half, so "any claim" and "the card" were the same set.
+    # A handed-over NVMe controller cannot kill a compositor -- nothing unloads,
+    # nothing rebinds a DRM node -- so asking the plain-VT question about one
+    # would be a warning that is simply untrue, and in a session with no tty it
+    # would refuse a round for a reason that does not exist.
+    risky = {c for c in claims if not _is_nvme(c)}
+    if risky and not confirm_plain_vt(a, name, risky):
         return False
     guard_exclusive_devices(name)
     guard_nvme_identity(name)
@@ -2564,8 +2572,12 @@ def guest_setup(a, name: str) -> int:
         return 1
 
     say("KURULUM GEÇTİ -- VDD ekranı var, LG host çalışıyor, misafir tek ekranda.")
-    if pci_claims(name):
-        say(f"  kapatmak: virsh -c {URI} shutdown {name}  (kart o zaman geri döner)")
+    claims = pci_claims(name)
+    if claims:
+        returned = ("kart" if any(not _is_nvme(c) for c in claims)
+                    else "denetleyici")
+        say(f"  kapatmak: virsh -c {URI} shutdown {name}  "
+            f"({returned} o zaman geri döner)")
     return 0
 
 
@@ -2639,9 +2651,9 @@ def system_nvme_target(a, address: str):
         f"\"boş\" demek değil -- {self_cmd('inventory')} diskin içeriğini "
         f"hiç okumaz.")
 
-    if getattr(a, "yes", False):
+    if getattr(a, "confirm_wipe", False):
         return ident
-    deliberate = self_cmd(*sys.argv[1:], "--yes")
+    deliberate = self_cmd(*sys.argv[1:], "--confirm-wipe")
     if not sys.stdin.isatty():
         die(f"onay sorulacak bir terminal yok. Bilerek isteniyorsa: "
             f"{deliberate}")
@@ -3030,8 +3042,14 @@ def main(argv: list[str] | None = None) -> int:
                    help="tanımlıysa önce temizle")
     b.add_argument("--setup", action="store_true",
                    help="tur bitince misafir betiklerini de sür")
-    b.add_argument("--yes", action="store_true",
-                   help="--system-nvme'nin disk onayını sorma")
+    # NOT --yes, and the collision is the reason. `setup` has a --yes that means
+    # "hand the card over from inside the desktop anyway", and confirm_plain_vt
+    # reads it off the same namespace when `build --setup` drives the guest
+    # side. One flag would have carried two unrelated consents, and the one it
+    # was not typed for is the one nobody would notice granting.
+    b.add_argument("--confirm-wipe", action="store_true",
+                   help="--system-nvme'nin disk onayını sorma "
+                        "(yalnız diski kapsar; düz VT onayı ayrıdır)")
     b.add_argument("--gpu-name", default="",
                    help="VDD'nin render edeceği bağdaştırıcı (boşsa misafirde keşfedilir)")
     b.set_defaults(func=cmd_build)
