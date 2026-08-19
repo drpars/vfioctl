@@ -37,7 +37,10 @@ on a domain that answered perfectly well.
 from __future__ import annotations
 
 import re
+import shutil
 import subprocess
+import time
+from dataclasses import dataclass, field
 from xml.etree import ElementTree
 
 URI = "qemu:///system"
@@ -49,6 +52,14 @@ READ_ONLY_VERBS = frozenset({"list", "dumpxml"})
 # What timeout(1) reports, reused here so that "never answered" is one value
 # everywhere in this tool (core/selftest.py:92 picked it first).
 TIMED_OUT = 124
+
+# Bounds for the reporting path only; guards pass None. The first call carries
+# the connection, which on a cold daemon includes libvirtd's socket activation,
+# so it gets its own larger allowance -- a flat per-call bound would report
+# "sorulamadı" on a machine that was merely starting up.
+CONNECT_TIMEOUT = 8.0
+READ_TIMEOUT = 5.0
+WALL_BUDGET = 12.0
 
 def _virsh(args: list[str], timeout: float | None) -> tuple[int, str]:
     """One read-only virsh call. Returns (returncode, stdout)."""
@@ -65,6 +76,16 @@ def _virsh(args: list[str], timeout: float | None) -> tuple[int, str]:
     except (OSError, subprocess.SubprocessError):
         return 1, ""
     return out.returncode, out.stdout
+
+
+def available() -> bool:
+    """Is there a virsh to ask at all -- answered without spawning anything.
+
+    The live-ISO and never-installed cases are the common ones, and they are
+    also the ones where spawning a process to find out would be the slowest
+    possible way to learn nothing.
+    """
+    return shutil.which("virsh") is not None
 
 
 def defined_domains(timeout: float | None = None) -> list[str]:
@@ -204,3 +225,95 @@ def usb_claims_of(name: str, timeout: float | None = None) -> set[str]:
     """
     xml = domain_xml(name, timeout=timeout)
     return _usb_of(xml) if xml is not None else set()
+
+# --------------------------------------------------------------------------- #
+# the snapshot the report annotates itself with
+# --------------------------------------------------------------------------- #
+
+@dataclass
+class Claimants:
+    """Who wants what, plus how much of that answer is actually known.
+
+    `known` is False when nothing could be asked at all. `unread` names the
+    domains that were asked and did not answer, and it exists so the report can
+    qualify its own silence: an empty claim line and an unasked question look
+    identical on the page, and only one of them is a measurement.
+    """
+    known: bool = False
+    detail: str = ""
+    unread: list[str] = field(default_factory=list)
+    read: list[str] = field(default_factory=list)
+    # ident -> domain names. `defined` is the stored definition, `live` is what
+    # a running domain holds beyond it -- a loan that ends when it shuts down.
+    defined: dict[str, list[str]] = field(default_factory=dict)
+    live: dict[str, list[str]] = field(default_factory=dict)
+
+    def of(self, ident: str) -> tuple[list[str], list[str]]:
+        return self.defined.get(ident, []), self.live.get(ident, [])
+
+
+def _add(where: dict[str, list[str]], ident: str, name: str) -> None:
+    names = where.setdefault(ident, [])
+    if name not in names:
+        names.append(name)
+
+
+def read(budget: float = WALL_BUDGET) -> Claimants:
+    """Every domain's claims, within a wall budget, never raising.
+
+    THE BUDGET IS A WALL AND NOT A PER-CALL BOUND. Thirty domains each
+    answering just under a per-call timeout would take thirty times that
+    timeout while never once timing out, so the deadline is taken from a
+    monotonic clock and each call is clamped to whatever is left of it.
+    Whatever the budget cuts off is reported as unread rather than as empty.
+    """
+    if not available():
+        return Claimants(known=False, detail="virsh yok — libvirt kurulu değil")
+
+    deadline = time.monotonic() + budget
+
+    def left(first: bool = False) -> float:
+        return min(CONNECT_TIMEOUT if first else READ_TIMEOUT,
+                   deadline - time.monotonic())
+
+    if left(first=True) <= 0:
+        return Claimants(known=False, detail="süre bütçesi tükendi")
+    names = defined_domains(timeout=left(first=True))
+    if not names:
+        return Claimants(known=True, detail="tanımlı domain yok")
+
+    running = set(running_domains(timeout=max(left(), 0.5)))
+    snapshot = Claimants(known=True)
+
+    for name in names:
+        remaining = left()
+        if remaining <= 0.5:
+            snapshot.unread.append(name)
+            continue
+        stored = domain_xml(name, inactive=True, timeout=remaining)
+        if stored is None:
+            snapshot.unread.append(name)
+            continue
+        snapshot.read.append(name)
+        for ident in _pci_of(stored) | _usb_of(stored):
+            _add(snapshot.defined, ident, name)
+
+        if name not in running:
+            continue
+        # A running domain may hold more than its definition says: `guest usb`
+        # attaches --live and never --config on purpose, so a lent radio exists
+        # in exactly one place and disappears when the guest shuts down.
+        remaining = left()
+        if remaining <= 0.5:
+            continue
+        active = domain_xml(name, timeout=remaining)
+        if active is None:
+            continue
+        for ident in (_pci_of(active) | _usb_of(active)) - (
+                _pci_of(stored) | _usb_of(stored)):
+            _add(snapshot.live, ident, name)
+
+    if snapshot.unread:
+        snapshot.detail = (f"{len(snapshot.read)}/{len(names)} tanım okundu — "
+                           f"{', '.join(snapshot.unread)} okunamadı")
+    return snapshot

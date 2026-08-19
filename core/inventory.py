@@ -37,6 +37,16 @@ by shutting the guest down, so it warns rather than refuses -- but shutting a
 guest down takes an input device, so the last one the host has is refused too.
 Everything else is said loudly and allowed.
 
+IT ALSO SAYS WHO ELSE WANTS THE DEVICE, AND THAT HALF IS NOT SYSFS. Every
+other line here is read from the machine; the claim comes from libvirt through
+core.domains, read-only and on a wall budget, and it is the one thing on the
+page this file does not measure itself. It is asked for once, after the items
+are built, so a claiming domain cannot reach a verdict -- and when it cannot be
+asked at all the report says so in its header rather than printing rows that
+look like nobody wants anything. The cost half of the question was always here
+("what does the HOST lose"); this is the other side of it, and until it existed
+two domains could quietly claim the same card with the inventory silent.
+
 EVERY MARK THAT IS NOT A REFUSAL COMES FROM ONE RULE IN ONE PLACE. Both buses
 ask _cost_verdict(): a row the host pays nothing measurable for is a candidate,
 a row it pays for is a warning. The rule used to be written twice and the two
@@ -234,6 +244,11 @@ class Item:
     reasons: list[str] = field(default_factory=list)
     group: str | None = None            # IOMMU group, PCI only
     note: str | None = None             # what it is, when that is not obvious
+    # Who else wants it. Kept out of `reasons` on purpose: guest/build.py
+    # prints that list verbatim and then dies with "yukarıdaki gerekçe", so a
+    # domain name parked in it would read as the justification for a refusal.
+    claimed_by: list[str] = field(default_factory=list)   # in a stored definition
+    lent_to: list[str] = field(default_factory=list)      # live only, ends at shutdown
 
 
 def _pci_title(device: probe.PciDevice) -> str:
@@ -538,6 +553,39 @@ def usb_items(devices: list[probe.UsbDevice],
 
 
 # --------------------------------------------------------------------------- #
+# who else wants it
+# --------------------------------------------------------------------------- #
+
+def annotate_claimants(items: list[Item], guests) -> None:
+    """Fill in which domains want each device -- AFTER every verdict is decided.
+
+    THE ORDER IS THE GUARANTEE AND NOT A CONVENTION. This runs on Items that
+    are already built, so a claiming domain cannot reach pci_items(),
+    usb_verdict() or _host_cost() even by a later edit: by the time a claimant
+    is in scope the verdict is a string on a finished object. Inventory reports
+    and does not decide (K14), and "another guest wants this" is a fact about
+    the machine, not a permission.
+
+    NOTHING IS INFERRED ACROSS AN IOMMU GROUP. A domain claiming 0000:01:00.0
+    does not get printed against 0000:01:00.1, even though the group moves as
+    one unit -- deriving that would be the inventory deciding what a domain
+    meant. Both functions appear on their own when a domain really asks for
+    both, which is what these two do.
+
+    A SNAPSHOT NOBODY COULD READ ANNOTATES NOTHING. Empty lists stay empty, and
+    the caller prints no line for them, so a row never claims that nobody wants
+    a device when the truth is that nobody could be asked.
+    """
+    if not guests.known:
+        return
+    for item in items:
+        # PCI is addressed by function, USB by vendor:product -- the same two
+        # keys libvirt writes into a <hostdev> source.
+        defined, live = guests.of(item.ident if item.bus == "pci" else item.ids)
+        item.claimed_by, item.lent_to = list(defined), list(live)
+
+
+# --------------------------------------------------------------------------- #
 # output
 # --------------------------------------------------------------------------- #
 
@@ -574,10 +622,41 @@ def _print_item(item: Item) -> None:
     print(detail)
     for reason in item.reasons:
         print(f"      {reason}")
+    # Painted in a colour the verdict scheme never uses (32/33/31), because
+    # this line says who wants the device and not whether it may move.
+    if item.claimed_by:
+        print(paint(f"      misafir tanımında: {', '.join(item.claimed_by)}", "36"))
+    if item.lent_to:
+        print(paint(f"      şu an misafirde: {', '.join(item.lent_to)}", "36"))
+
+
+def _guest_header(guests) -> str:
+    """One line saying how much of the "who wants it" answer is actually known.
+
+    IT NAMES THE CONSEQUENCE, NOT JUST THE COUNT. An unread domain and a device
+    nobody wants both print as a row with no claim line, and only one of those
+    is a measurement -- so when something went unread the header says which
+    lines may be short, rather than leaving the reader to treat silence as fact.
+    """
+    if not guests.known:
+        return paint(f"sorulmadı — {guests.detail}", "33")
+    if guests.unread:
+        return paint(f"{guests.detail} — eksik okunan tanımların istekleri "
+                     f"aşağıda görünmez", "33")
+    if not guests.read:
+        return guests.detail or "tanımlı domain yok"
+    return f"{len(guests.read)} tanım okundu ({', '.join(guests.read)})"
 
 
 def report(profile_name: str | None = None) -> int:
-    """Read the machine and print what could move. Writes nothing, ever."""
+    """Read the machine and print what could move. Writes nothing, ever.
+
+    IT REACHES LIBVIRT FROM HERE, AND ONLY FROM HERE. core.domains is asked once
+    for who claims what, read-only and on a wall budget; every other line on the
+    page comes from sysfs. The claim arrives after the items are built, so it
+    annotates and never judges -- see annotate_claimants.
+    """
+    from . import domains
     from . import profile as profile_mod
 
     machine = probe.read_machine()
@@ -586,6 +665,8 @@ def report(profile_name: str | None = None) -> int:
 
     print(f"Makine   : {machine.dmi_vendor or '?'} {machine.dmi_product or '?'}")
     print(f"Profil   : {p.name if p else paint('yok — yalnızca donanım okundu', '33')}")
+    guests = domains.read()
+    print(f"Misafir  : {_guest_header(guests)}")
     print()
     print(paint("Envanter yalnızca rapordur: v1 GPU'dan başka hiçbir cihazı "
                  "devretmez (K14).", "2"))
@@ -596,6 +677,7 @@ def report(profile_name: str | None = None) -> int:
     usb_devices = probe.usb_devices()
     pci, bridges = pci_items(machine, p, claims, usb_devices)
     usb = usb_items(usb_devices)
+    annotate_claimants(pci + usb, guests)
 
     print(paint("PCI — devir birimi IOMMU grubudur, cihaz değil", "1"))
     for item in pci:
@@ -619,4 +701,7 @@ def report(profile_name: str | None = None) -> int:
     print("Bir USB denetleyicisini (PCI) devretmek üstündeki her cihazı "
           "birlikte götürür;\ntek bir USB cihazını devretmek götürmez. "
           "İkisi ayrı satırlar — karıştırılmaz.")
+    print("\"misafir tanımında\" kalıcı tanımdan okunur ve domain kapalıyken de "
+          "durur;\n\"şu an misafirde\" yalnız koşarken vardır — ödünç verilen "
+          "aygıt misafir kapanınca geri gelir.")
     return 0

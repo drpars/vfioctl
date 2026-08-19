@@ -154,6 +154,17 @@ da radyo misafiri kapatınca geri gelir, ama misafiri kapatmak da bir girdi
 aygıtı ister — o yüzden sonuncusu reddedilir, geri kalanı yüksek sesle söylenip
 geçilir.
 
+**Envanter "bu cihazı hangi misafir istiyor"u da söyler.** İki domain aynı
+kartı kalıcı tanımında tutabilir ve bunu bugüne kadar hiçbir yer söylemiyordu.
+Satır iki biçimde çıkar: `misafir tanımında` kalıcı tanımdan okunur ve domain
+kapalıyken de durur; `şu an misafirde` yalnız koşan bir misafirin canlı olarak
+aldığı aygıtlardır (`guest usb`'nin ödüncü — misafir kapanınca geri gelir).
+**Hüküm bundan etkilenmez:** iddia, hükümler verildikten *sonra* eklenir, yani
+bir misafirin cihazı istemesi devri ne engeller ne serbest bırakır. libvirt
+sorulamıyorsa (kurulu değil, ayakta değil, izin yok) envanter yine tam çalışır
+ve **başlığında sorulamadığını yazar** — boş bir satır "kimse istemiyor"
+demek değildir.
+
 **İşaretin kuralı tektir ve iki veri yolunda da aynıdır: bedel varsa `!`, yoksa
 `✓`.** Bir zamanlar iki kez yazılmıştı ve iki kopya birbirini tutmuyordu —
 makinedeki tek Bluetooth radyosu, denetleyicisinin satırında bedel sayılıp
