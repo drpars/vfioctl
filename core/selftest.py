@@ -51,28 +51,9 @@ from pathlib import Path
 
 from . import hostfiles, install as install_mod, probe, provenance, session
 
-def _log_path() -> Path:
-    """Where the run's transcript goes -- deliberately not /tmp.
-
-    The docstring above says the log exists so the result survives the reader.
-    It did not survive the machine. /tmp is a tmpfs here, and the one failure
-    this command cannot reconstruct afterwards is also the one whose only
-    recovery is a reboot: measured 2026-08-18, the round that left `modprobe`
-    in D state took its own transcript with it, and what had happened had to be
-    rebuilt from the journal and the hook log.
-
-    XDG_STATE_HOME is the drawer for exactly this by its own definition --
-    state that should persist between restarts and is not precious enough for
-    XDG_DATA_HOME. The fallback is the spec's default and not /tmp: an
-    unwritable path costs the file, which Tee already survives, while a tmpfs
-    one costs the evidence.
-    """
-    base = os.environ.get("XDG_STATE_HOME", "").strip()
-    root = Path(base) if base.startswith("/") else Path.home() / ".local" / "state"
-    return root / "vfioctl" / "selftest.log"
-
-
-LOG = _log_path()
+# Where this goes and why is hostfiles.state_log; it is one rule for every
+# round that writes a transcript, and this file is where it was measured.
+LOG = hostfiles.state_log("selftest.log")
 HOOK_LOG = hostfiles.HOOK_LOG
 PROC = Path("/proc")
 

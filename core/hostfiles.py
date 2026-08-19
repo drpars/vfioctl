@@ -157,12 +157,46 @@ prints the byte value for that reason.
 from __future__ import annotations
 
 import math
+import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 HOOK_ASSET = PROJECT_ROOT / "data" / "50-vfio-handover"
+
+def state_log(name: str) -> Path:
+    """Where a round's transcript goes -- deliberately not /tmp.
+
+    A transcript exists so a result survives the reader. It also has to survive
+    the machine, and here those are different things: /tmp is a tmpfs, and the
+    one failure these rounds cannot reconstruct afterwards is also the one
+    whose only recovery is a reboot -- measured 2026-08-18, the round that left
+    `modprobe` in D state took its own transcript with it, and what had
+    happened had to be rebuilt from the journal and the hook log.
+
+    XDG_STATE_HOME is the drawer for exactly this by its own definition --
+    state that should persist between restarts and is not precious enough for
+    XDG_DATA_HOME. The fallback is the spec's default and not /tmp: an
+    unwritable path costs the file, which Tee already survives, while a tmpfs
+    one costs the evidence.
+
+    IT IS ONE FUNCTION BECAUSE IT IS ONE RULE, and the day it was two is what
+    put it here. selftest moved off /tmp on 2026-08-18; guest setup did not,
+    and kept a hardcoded tmpfs path under a comment that already said its
+    transcript had to outlive a dead terminal. So for a while the round that
+    actually held the card -- the only one that can wedge the rebind this
+    reasoning is about -- was the one writing where a reboot erases it
+    (measured 2026-08-19, the cardful mode 2 round).
+
+    THE DIRECTORY IS NOT CREATED HERE. A path is not a file, and the callers
+    that write one already create its parent inside their own Tee, where an
+    unwritable drawer degrades to "no log" instead of killing the round.
+    """
+    base = os.environ.get("XDG_STATE_HOME", "").strip()
+    root = Path(base) if base.startswith("/") else Path.home() / ".local" / "state"
+    return root / "vfioctl" / name
+
 
 DRM_CLASS = Path("/sys/class/drm")
 

@@ -172,7 +172,27 @@ PCI_DEVICES = Path("/sys/bus/pci/devices")
 # Same reason core/selftest.py writes one: a round that hands the card over can
 # take the graphics session with it, and a result that only existed in a dead
 # terminal is a round that has to be run again.
-SETUP_LOG = Path("/tmp/vfioctl-setup.log")
+#
+# WHICH IS WHY THE PATH IS NOT SPELLED OUT HERE ANY MORE. It used to be
+# /tmp/vfioctl-setup.log, three lines under the sentence above -- and a tmpfs
+# does not merely lose the terminal, it loses the file, on exactly the failure
+# whose only recovery is the reboot that clears it. hostfiles.state_log owns
+# that rule for every round that writes a transcript; asking it here is what
+# keeps this half from drifting off again while the other half stays fixed.
+#
+# IT IS A FUNCTION AND NOT A CONSTANT because core is imported late in this
+# file, by path, and a module-level constant would have to pay that import on
+# every `vfioctl guest` invocation -- including the ones that never write a
+# transcript. Cached, so the answer cannot change inside one round.
+_SETUP_LOG: Path | None = None
+
+
+def setup_log() -> Path:
+    """This round's transcript, in the drawer hostfiles picks."""
+    global _SETUP_LOG
+    if _SETUP_LOG is None:
+        _SETUP_LOG = _core_hostfiles().state_log("setup.log")
+    return _SETUP_LOG
 
 # OWNERSHIP, AND WHY IT IS NOT A LIST OF NAMES. The destructive half of this
 # script used to be gated by a blacklist -- PROTECTED_DOMAINS = {"win11"} and the
@@ -236,6 +256,13 @@ class Tee:
     def __init__(self, path: Path):
         self.stream = sys.stdout
         try:
+            # The drawer under XDG_STATE_HOME does not exist until somebody
+            # makes it, and open("a") on a missing parent raises -- which this
+            # except turns into "no log at all", silently. While the path was
+            # /tmp the directory was always there and the mkdir was never
+            # needed; it became load-bearing the moment the path moved.
+            # core/selftest.py's Tee has had this line since it moved.
+            path.parent.mkdir(parents=True, exist_ok=True)
             self.file = path.open("a", encoding="utf-8")
         except OSError:
             self.file = None
@@ -254,7 +281,7 @@ class Tee:
     def isatty(self) -> bool:
         """False even when the terminal half is one, so nothing paints.
 
-        Half of this stream is SETUP_LOG, and that file is what a round is read
+        Half of this stream is the setup transcript, and that file is what a round is read
         from after the fact. Escape codes written for the terminal land in it
         as well. core/term.py owns the rest of that rule.
         """
@@ -277,7 +304,7 @@ def redacted_argv() -> list[str]:
     and the command line is where --password lives. This file already goes out
     of its way to keep it off the process table -- that is the entire reason
     --password-file exists -- so echoing it to the terminal, and into
-    SETUP_LOG, would hand it back through the door that was closed. The file
+    the setup transcript, would hand it back through the door that was closed. The file
     path form is left alone: it names a file, not a secret.
     """
     out: list[str] = []
@@ -2919,12 +2946,13 @@ def guest_setup(a, name: str) -> int:
     values with it -- so a session that was there when the round started can be
     gone by the time the step that needs it runs.
     """
-    sys.stdout = Tee(SETUP_LOG)  # type: ignore[assignment]
+    log_path = setup_log()
+    sys.stdout = Tee(log_path)  # type: ignore[assignment]
     workdir = IMAGES / f"{name}-unattend"
     workdir.mkdir(parents=True, exist_ok=True)
 
     print()
-    say(f"===== setup {name}   günlük: {SETUP_LOG}")
+    say(f"===== setup {name}   günlük: {log_path}")
     if getattr(a, "start", False) and not start_for_setup(a, name, workdir):
         say("TUR DÜŞTÜ -- misafir sürülebilir hâle gelmedi.")
         return 1
