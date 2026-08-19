@@ -159,16 +159,33 @@ def _checks_with_profile(machine: probe.Machine, p: Profile) -> list[Check]:
 
     if p.mux:
         value = probe.read_sysfs_value(p.mux.sysfs)
-        ok = value == p.mux.required
-        checks.append(Check(
-            "mux", HARD, ok, "MUX doğru kipte",
-            f"{p.mux.sysfs} = {value if value is not None else '(okunamadı)'}"
-            + (f"; beklenen {p.mux.required} ({p.mux.meaning})" if not ok else
-               f" ({p.mux.meaning})"),
-            remedy="" if ok else
-            "Diğer kipte dahili panel dGPU'ya bağlıdır; devir ekranı da götürür. "
-            "Değişiklik yeniden başlatma ister.",
-        ))
+        # UNREADABLE IS NOT WRONG-MODE, and folding the two together closes the
+        # gate on a machine whose hardware never changed. The attribute belongs
+        # to a driver (asus-nb-wmi here); it does not exist when the module is
+        # not loaded, and upstream may rename it -- both are exactly the
+        # "a kernel upgrade must not stop the tool" case profile.py forbids.
+        # None keeps the gate open because Check.blocking tests `is False`;
+        # report() gives it its own bucket so the verdict cannot read it as a
+        # pass. Silence here would be fail-open, which is why it is reported.
+        if value is None:
+            ok = None
+            detail = (f"{p.mux.sysfs} okunamadı; beklenen {p.mux.required} "
+                      f"({p.mux.meaning})")
+            remedy = (
+                "Öznitelik sürücüsüyle gelir (bu profilde asus-nb-wmi): modül "
+                "yüklü değilse ya da yukarı akış adı değiştirdiyse dosya hiç "
+                "doğmaz. Kip yanlış demek DEĞİL — devretmeden önce dahili "
+                "panelin hangi karta bağlı olduğu elle doğrulanır.")
+        else:
+            ok = value == p.mux.required
+            detail = f"{p.mux.sysfs} = {value}" + (
+                f" ({p.mux.meaning})" if ok else
+                f"; beklenen {p.mux.required} ({p.mux.meaning})")
+            remedy = "" if ok else (
+                "Diğer kipte dahili panel dGPU'ya bağlıdır; devir ekranı da "
+                "götürür. Değişiklik yeniden başlatma ister.")
+        checks.append(Check("mux", HARD, ok, "MUX doğru kipte", detail,
+                            remedy=remedy))
 
     if p.kernel_flavour:
         ok = p.kernel_flavour in machine.kernel
@@ -557,7 +574,25 @@ def report(profile_name: str | None = None) -> int:
 
     blocking = [c for c in checks if c.blocking]
     warnings = [c for c in checks if c.severity == SOFT and c.ok is False]
+    # THE THIRD BUCKET, and it is the one the verdict lines below cannot say.
+    # A hard criterion that could not be measured is neither pass nor failure:
+    # it does not close the gate (Check.blocking is `is False` on purpose), so
+    # with only two buckets it falls silently into "sert ölçütlerin hepsi
+    # geçti" -- the reader is told a question passed that was never asked. The
+    # "?" is already on its own line above; what is added here is that the
+    # summary stops contradicting it.
+    unmeasured = [c for c in checks if c.severity == HARD and c.ok is None]
     print()
+
+    if unmeasured:
+        print(paint(f"{len(unmeasured)} sert ölçüt ÖLÇÜLEMEDİ — kapıyı "
+                    "kapatmaz, ama geçtiği de söylenmez:", "1;36"))
+        for c in unmeasured:
+            print(f"  - {c.title}: {c.detail}")
+            if c.remedy:
+                for line in c.remedy.splitlines():
+                    print(f"    {line}")
+        print()
 
     if p is None:
         print(paint("Yazan alt komutlar koşmaz: profil eşleşmesi yok.", "33"))
@@ -583,7 +618,9 @@ def report(profile_name: str | None = None) -> int:
               "çalışan bir passthrough kurulumu, hiç kurulmamış olmaktan kötü.")
         return 1
 
-    print(paint("KAPI AÇIK — sert ölçütlerin hepsi geçti.", "1;32"))
+    print(paint("KAPI AÇIK — sert ölçütlerin hepsi geçti." if not unmeasured
+                else "KAPI AÇIK — geçmeyen sert ölçüt yok; ölçülemeyen var.",
+                "1;32"))
     if warnings:
         print(f"{len(warnings)} yumuşak uyarı var; engel değil:")
         for c in warnings:

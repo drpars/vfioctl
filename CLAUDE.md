@@ -33,9 +33,11 @@ yazılmayan muafiyet, kuralı ilk aykırı komutta yalana çevirir:
 
 - **Geri alan yollar** — `uninstall` sorar, söyler ve **yine de koşar**;
   `guest clean` hiç sormaz. Makine, `install` yazdıktan
-  *sonra* sınıftan düşebilir (MUX çevrilir, çekirdek özniteliği bırakır); red o
+  *sonra* sınıftan düşebilir (MUX çevrilir, kart başka yuvaya taşınır); red o
   zaman aracın `/etc`'teki dosyalarını tam da onları kaldırmak isteyen makinede
-  mahsur bırakır.
+  mahsur bırakır. *Çekirdeğin özniteliği bırakması bu listede değil:*
+  okunamayan sert ölçüt artık **ölçülemedi** diye raporlanıyor ve kapıyı
+  kapatmıyor.
 - **Host'un hiçbir şeyini hareket ettirmeyen yollar** — `build --disk` bir imaj
   ve **kartsız** bir domain üretir. Sınıf dışı makinede koşar ve yalnızca
   Looking Glass'sız kalır; `ivshmem_parts()` bunu düşmek yerine **söyler**.

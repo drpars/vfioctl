@@ -553,9 +553,11 @@ def uninstall(profile_name: str | None = None, kvmfr_mb: int | None = None) -> i
     WHY THE GATE IS ASKED HERE AND NOT OBEYED. The subcommands that ask it
     stop on a closed gate; this one is the way back out. A machine can fall
     out of class after install already wrote -- a flipped MUX, a firmware
-    setting, a kernel that stopped exporting an attribute -- and refusing then
-    would strand this tool's files in /etc on the one machine whose owner wants
-    them gone. So the answer is read and said out loud rather than dropped on
+    setting, a card moved to another slot -- and refusing then would strand
+    this tool's files in /etc on the one machine whose owner wants them gone.
+    (A kernel that stops exporting an attribute used to belong on that list;
+    since 2026-08-19 an unreadable hard criterion reports as unmeasured and
+    leaves the gate open, so it is no longer an example of falling out.) So the answer is read and said out loud rather than dropped on
     the floor: the exemption is a decision, and a decision that is not visible
     in the output is indistinguishable from the bug of forgetting to ask.
     """
