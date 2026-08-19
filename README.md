@@ -154,6 +154,15 @@ da radyo misafiri kapatınca geri gelir, ama misafiri kapatmak da bir girdi
 aygıtı ister — o yüzden sonuncusu reddedilir, geri kalanı yüksek sesle söylenip
 geçilir.
 
+**İşaretin kuralı tektir ve iki veri yolunda da aynıdır: bedel varsa `!`, yoksa
+`✓`.** Bir zamanlar iki kez yazılmıştı ve iki kopya birbirini tutmuyordu —
+makinedeki tek Bluetooth radyosu, denetleyicisinin satırında bedel sayılıp
+kendi satırında bedelsiz `✓` alıyordu. **`✓` "ölçülen bedel yok" demektir,
+"bedelsiz" değil:** ölçülen şey dört sorudur, o yüzden bağlı olmayan bir disk
+de kartın kendisi de `✓` alır (aynı ayrım disk tarafında da yazılı, bkz.
+"Kip 2"). **Ve yalnız `✗` engeldir** — `!` uyarır, devri durdurmaz; hükmü okuyan
+iki komut da (`guest usb`, `guest nvme`) yalnızca `✗`'e bakar.
+
 ### Koşan misafire USB aygıtı ödünç vermek
 
 ```sh

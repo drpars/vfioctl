@@ -36,6 +36,15 @@ is refused for the same reason. A lost keyboard or a lost radio is recoverable
 by shutting the guest down, so it warns rather than refuses -- but shutting a
 guest down takes an input device, so the last one the host has is refused too.
 Everything else is said loudly and allowed.
+
+EVERY MARK THAT IS NOT A REFUSAL COMES FROM ONE RULE IN ONE PLACE. Both buses
+ask _cost_verdict(): a row the host pays nothing measurable for is a candidate,
+a row it pays for is a warning. The rule used to be written twice and the two
+copies disagreed -- this machine's only Bluetooth radio was counted as a cost
+on its controller's row and marked a free candidate on its own row four lines
+below. A refusal outranks the rule, and a refusal is the only thing that stops
+anything: both places outside this file that read a verdict, in guest/build.py,
+test for REFUSE and nothing else.
 """
 
 from __future__ import annotations
@@ -60,6 +69,29 @@ CANDIDATE, WARN, REFUSE = "aday", "uyarı", "red"
 # ports are the topology itself. They are counted in the footer rather than
 # listed, because thirty of them is what makes an inventory unreadable.
 CLASS_BRIDGE = "0x06"
+
+
+def _cost_verdict(cost: list[str]) -> str:
+    """The mark a row gets once nothing has refused it: the rule, for every bus.
+
+    A "✓" says this tool measured no cost to the host; anything the host does
+    lose while the guest runs is a "!". Written here once rather than at each
+    bus, because it was written twice and the two copies disagreed: on PCI a
+    cost demoted the verdict, on USB the single-Bluetooth cost was printed and
+    the verdict left alone. One fact -- the host loses its radio -- therefore
+    came out as "!" on the controller's row and "✓" on the radio's own row four
+    lines below it. The next device class would have re-created that split; a
+    rule cannot.
+
+    IT NEVER RETURNS A REFUSAL, AND THAT IS WHY IT IS NOT CALLED "the verdict".
+    Refusals answer a different question -- can this be undone -- and they
+    outrank any cost, so each bus decides its own and applies it AFTER this.
+    Letting this function have the last word would turn the one USB refusal
+    (no input device left on the host) into a warning, and the only external
+    reader of that refusal, guest/build.py, would then lend the host's last
+    keyboard away.
+    """
+    return WARN if cost else CANDIDATE
 
 
 # --------------------------------------------------------------------------- #
@@ -311,12 +343,14 @@ def pci_items(machine: probe.Machine, p: Profile | None, claims: StorageClaims,
             note = "bu aracın devrettiği kart" if device.address == dgpu.address \
                 else "devredilen kartın ses fonksiyonu — grubuyla birlikte gider"
 
-        # 5. Everything else the host would notice.
+        # 5. Everything else the host would notice. The rule is shared with
+        #    USB; the gate is not. A refusal outranks any cost, so a refused
+        #    row is never asked for one -- which is what keeps "IOMMU grubu
+        #    yok" from being followed by a bus-00 warning nobody can act on.
         if verdict == CANDIDATE:
             cost = _host_cost(device, machine, usb)
-            if cost:
-                verdict = WARN
-                reasons.extend(cost)
+            reasons.extend(cost)
+            verdict = _cost_verdict(cost)
 
         items.append(Item(
             bus="pci", ident=device.address, ids=device.ids,
@@ -442,13 +476,24 @@ def usb_verdict(device: probe.UsbDevice, devices: list[probe.UsbDevice],
     second leaves nothing to type the command that undoes it. On this laptop
     the rule stays quiet -- the touchpad is I2C and never leaves -- and that is
     the point of counting what stays rather than what goes.
+
+    TWO LISTS, BECAUSE NOT EVERY PRINTED LINE IS A COST. `cost` is what the
+    host loses, and it is the only thing the rule is allowed to see; `reasons`
+    is everything worth printing and a superset of it. "host'ta kalan girdi"
+    is the clearest case: it says what the host KEEPS, so feeding it to the
+    rule would make the rule's own docstring false about its input.
+
+    UNLIKE PCI, THE COSTS ARE PRINTED UNDER A REFUSAL TOO, deliberately. The
+    line naming the input device is what the refusal means; guest/build.py
+    prints these and then dies with "yukarıdaki gerekçe", so dropping them
+    would leave that sentence pointing at nothing.
     """
     reasons: list[str] = []
-    verdict = CANDIDATE
+    cost: list[str] = []
+    refused = False
     bluetooth = [d for d in devices if "btusb" in d.drivers]
 
     if "usbhid" in device.drivers:
-        verdict = WARN
         # One HID device registers several input nodes (a mouse announces a
         # keyboard, a consumer-control and a mouse), and printing all of
         # them repeats the device's own name five times. What the reader
@@ -456,19 +501,24 @@ def usb_verdict(device: probe.UsbDevice, devices: list[probe.UsbDevice],
         # their distinguishing tail.
         kinds = _input_kinds(device)
         label = ", ".join(kinds) if kinds else "girdi aygıtı"
-        reasons.append(f"host'un girdi aygıtı ({label}) — devredilirse "
-                       "misafire geçer, host'ta çalışmaz")
+        cost.append(f"host'un girdi aygıtı ({label}) — devredilirse "
+                    "misafire geçer, host'ta çalışmaz")
+        reasons.extend(cost[-1:])
         keyboard, pointer, staying = _host_keeps(device.name, inputs)
         if keyboard or pointer:
+            # What stays is not a loss, so it is printed and not counted.
             reasons.append(f"host'ta kalan girdi: {staying}")
         else:
-            verdict = REFUSE
+            refused = True
             reasons.append("host'ta başka girdi aygıtı kalmıyor — devri geri "
                            "alacak komutu yazacak klavye ya da fare kalmaz")
+    # A separate `if`, never an `elif`: a combined HID and Bluetooth dongle
+    # costs the host both, and an `elif` would silently drop the second line.
     if "btusb" in device.drivers and len(bluetooth) == 1:
-        reasons.append("makinedeki tek Bluetooth — misafir koşarken host "
-                       "Bluetooth'unu kaybeder")
-    return verdict, reasons
+        cost.append("makinedeki tek Bluetooth — misafir koşarken host "
+                    "Bluetooth'unu kaybeder")
+        reasons.extend(cost[-1:])
+    return (REFUSE if refused else _cost_verdict(cost)), reasons
 
 
 def usb_items(devices: list[probe.UsbDevice],
@@ -492,6 +542,24 @@ def usb_items(devices: list[probe.UsbDevice],
 # --------------------------------------------------------------------------- #
 
 MARKS = {CANDIDATE: ("✓", "32"), WARN: ("!", "33"), REFUSE: ("✗", "31")}
+
+# What the marks promise, kept beside them rather than inlined in report(),
+# because guest/build.py draws this same table a second time (_usb_status) and
+# an inline legend would leave that copy free to invent its own words.
+#
+# WORDED TO WHAT IS MEASURED, NOT TO THE IDEAL. "✓" cannot promise the host
+# loses nothing: _host_cost() asks four questions, so this machine's unmounted
+# 931G disk and the discrete GPU itself both come out "✓" while handing either
+# over does cost the host something real. README.md already says it in the
+# other direction -- "✓" means the host is not standing on the drive, not that
+# the drive is empty -- and a legend that promised more would contradict it.
+#
+# The last sentence is the one worth printing: a "!" reads like a barrier and
+# is not one. Measured, not promised -- guest/build.py refuses on REFUSE alone.
+LEGEND = ("İşaretler — ✓ aday: ölçülen bir bedel yok · ! uyarılı: host, "
+          "misafir koşarken bir işlevini\n"
+          "kaybeder · ✗ devredilemez. "
+          "Engelleyen tek işaret ✗'tir; ! uyarır, durdurmaz.")
 
 
 def _print_item(item: Item) -> None:
@@ -521,6 +589,7 @@ def report(profile_name: str | None = None) -> int:
     print()
     print(paint("Envanter yalnızca rapordur: v1 GPU'dan başka hiçbir cihazı "
                  "devretmez (K14).", "2"))
+    print(paint(LEGEND, "2"))
     print()
 
     claims = host_storage_claims()
