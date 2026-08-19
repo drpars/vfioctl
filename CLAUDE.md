@@ -5,7 +5,7 @@ kurulumunu **kuran, ölçen ve süren** CLI aracı. Kapsam ve yol haritası →
 [README.md](README.md).
 
 Araştırma notları bu depoda **değil**: `~/Belgeler/pars/vfioctl/NOTLAR.md`.
-Donanım olguları, tuzaklar ve kararlar (K1–K15) orada; bir davranışın *neden*
+Donanım olguları, tuzaklar ve kararlar (K1–K21) orada; bir davranışın *neden*
 öyle olduğu sorusu önce oraya sorulur.
 
 ## Dil
@@ -41,19 +41,40 @@ bir alt komudun onu kazara atlayamaması.
 - **`win11` domain'i ve `~/.images/win11.qcow2`** — çalışan misafir. Yıkıcı yol
   ona **ad ve disk yoluyla** kapalı (`guest/build.py`), koruma kaldırılmaz.
   Denemeler `win11-test` üzerinde yapılır.
-- **Kartı yalnızca hook taşır.** Hiçbir alt komut bir PCI cihazını bağlamaz,
-  çözmez, probe etmez; `install` dosya yazar, `selftest` misafir başlatıp okur.
-  İkinci bir yazar, bu makineyi üç kez kilitleyen yolun ta kendisi. Bir alt
-  komuda "devir" işi eklenecekse önce bu madde tartışılır.
-  - **Maddenin konusu PCI bind yollarıdır; USB hostdev dışındadır** (2026-08-05
-    tartışıldı, `guest usb` yazılmadan önce). Üç ölçüm: hook `type='pci'`
-    süzüyor — yalnız USB taşıyan bir XML'e `no handover` diyor, yani USB satırı
-    kartı taşıyan yolu çağıramıyor; canlı takmada hook zaten hiç koşmuyor
-    (hook'lar domain başlarken/biterken koşar); ve libvirt'in belgesi `managed`
-    özniteliğini **yalnızca PCI** için okuyup USB'yi kendisi ayırdığını
-    söylüyor. Yani USB'de "ikinci yazar" olan araç değil libvirt, ve ayırdığı
-    şey `btusb`'nin sıradan bir disconnect'i — nvidia yığınının `R` durumunda
-    kilitlenen yolu değil.
+- **Kartın bind yollarında tek yazar vardır ve o hook'tur.** Hiçbir alt komut
+  kartı bağlamaz, çözmez, probe etmez; `install` dosya yazar, `selftest` misafir
+  başlatıp okur. İkinci bir yazar, bu makineyi üç kez kilitleyen yolun ta
+  kendisi. XML tarafındaki karşılığı kartın `managed='no'`'sudur (K8) ve
+  kaldırılmaz — `'yes'` libvirt'i aynı yollara ikinci yazar yapardı.
+  - **Yasağın konusu kartın yollarıdır, "PCI" sözcüğü değil** (2026-08-19'da
+    ölçülerek ayrıldı). Kart **dışındaki** bir PCI cihazı için libvirt tek yazar
+    olabilir: `guest nvme` ve `build --system-nvme` NVMe denetleyicisini
+    `managed='yes'` ile domain'in kalıcı tanımına yazar, bağlamayı domain
+    başlarken libvirt yapar, araç hiçbir sysfs yoluna dokunmaz. İzin veren üç
+    ölçüm, üçü de bu maddenin şartı: (1) `nvme` sürücüsünün boşaltma dansı yok —
+    unbind'da bırakıyor, probe'da geri alıyor (2026-08-18, boş Crucial
+    `0000:02:00.0`; **tek disk, tek makine, tek tarih** — sınıfa genellenmedi);
+    (2) hook o cihaza **yazamaz**, çünkü her eylemi `for dev in $DEVICES`
+    döngüsüdür ve `$DEVICES` `vfio.conf`'tan gelir, domain'in XML'inden değil;
+    (3) NVMe `vfio.conf`'a araç eliyle **giremez** — `install` o satırı dGPU'nun
+    IOMMU grubundan yazar ve grupta fazladan üye varsa kurulumu tümden reddeder
+    (`core/install.py:97-100`). **Üçünden biri düşerse istisna da düşer.**
+  - **USB hostdev de dışarıda, ama başka sebeple** (2026-08-05, `guest usb`
+    yazılmadan önce tartışıldı). Üç ölçüm: hook `type='pci'` süzüyor — yalnız
+    USB taşıyan bir XML'e `no handover` diyor; canlı takmada hook zaten hiç
+    koşmuyor; `managed` özniteliğini libvirt **yalnızca PCI** için okuyup USB'yi
+    kendisi ayırıyor. **Bu üç ölçüm NVMe'ye taşınmaz, ve taşınmaya çalışılırsa
+    yanlış güven verir:** NVMe hostdev'i `type='pci'` olduğu için hook onu
+    `hostdev:` satırında **görür** — koruyan şey süzgeç değil `$DEVICES`'ın
+    kapsamıdır (yukarıdaki 2. ve 3. ölçüm).
+  - **Devrin hükmünü bu madde vermez:** hangi cihazın kalkabileceğini
+    `core.inventory` söyler (K14'ün sert koruması, bayraksız), ve hüküm **yazma
+    anında** koşar — bağlama `virsh start`'ta olur. Arada adres kayabilir
+    (2026-08-17'de kaydı), köprü `<metadata>`'daki kimlik kaydıdır.
+  - **Dördüncü bir cihaz sınıfı gelirse önce bu madde güncellenir, sonra kod
+    yazılır.** `guest nvme` tersini yaptı: kod 2026-08-18'de girdi, çelişkiyi
+    ertesi günkü kod incelemesi buldu (madde 12) ve bu madde bir gün boyunca
+    davranışı yanlış anlattı. Sorulacak sorular yukarıdaki üç ölçümdür.
 - **Paket kurulmaz.** Eksik paket ölçülür ve komutu basılır. Kurmak, bir AUR
   yardımcısının disiplinini (özellikle: asla `--noconfirm`, PKGBUILD diff'i
   okunur) burada yeniden üretmek demek olurdu.
