@@ -1405,6 +1405,75 @@ def guard_nvme_detach(name: str, address: str, blocks: list[str]) -> None:
         f"takılmaz; adreste hiçbir cihaz yoksa da takılmaz.")
 
 
+CDROM_BLOCK = re.compile(r"<disk\b[^>]*device='cdrom'.*?</disk>", re.DOTALL)
+DISK_SOURCE = re.compile(r"<source file='([^']*)'")
+
+
+def answer_file_isos(xml: str) -> list[str]:
+    """CD-ROM sources in this domain that carry an answer file, by name.
+
+    MATCHED ON THE NAME THIS TOOL GIVES ITS OWN ISO, and that limit is stated
+    in the warning rather than hidden: a hand-rolled answer disc called
+    something else reads as an ordinary CD-ROM here. What the check is for is
+    the ISO `build` attaches and nothing ever takes back out -- measured on
+    this machine, win11-test still carries it long after its install finished.
+    """
+    out = []
+    for block in CDROM_BLOCK.findall(xml):
+        m = DISK_SOURCE.search(block)
+        if m and os.path.basename(m.group(1)).lower() == "unattend.iso":
+            out.append(m.group(1))
+    return out
+
+
+def guard_unattended_answer_file(name: str, xml: str, address: str,
+                                 confirmed: bool) -> None:
+    """Attaching a real drive to a domain still armed to answer Setup.
+
+    THE ASYMMETRY THIS CLOSES. `build --system-nvme` will not partition a drive
+    without EVET typed at a terminal, because an unattended install is the one
+    thing in this tool that destroys data nobody asked it to touch. --attach
+    reaches the same hardware by another road: it adds a physical controller
+    and signs off with "the guest sees a blank disk, the guest partitions it".
+    That sentence is true of a guest a human drives. It is also true of a
+    Setup that drives itself.
+
+    WHAT IS KNOWN AND WHAT IS NOT, because the difference decides that this
+    asks rather than refuses. Known: the ISO stays attached forever (nothing
+    here ejects it), and the answer file wipes DiskID 0 -- its own template
+    comment justifies that number with "DiskID 0 is the only disk in the
+    domain", which is the premise --attach removes. Not known: which disk a
+    passed-through controller becomes once Setup enumerates them; that is
+    exactly what the M1 measurement is for. An absolute refusal would be
+    written on the unknown half, and would block every domain this tool builds,
+    since it is the tool that leaves the ISO there.
+
+    So the state is reported, the unknown is named as unknown, and the same
+    typed confirmation that mode 2 uses decides it.
+    """
+    isos = answer_file_isos(xml)
+    if not isos:
+        return
+    say(f"UYARI: '{name}' hâlâ cevap dosyası ISO'sunu taşıyor: "
+        f"{', '.join(isos)}")
+    say(f"  Setup bir daha koşarsa autounattend DiskID 0'ı WillWipeDisk ile "
+        f"siler. {address} eklendikten sonra DiskID sırasının ne olduğu "
+        f"ÖLÇÜLMEDİ -- yani bu diskin silinmeyeceği söylenemiyor.")
+    say(f"  Kurulum bittiyse ISO'nun işi de bitmiştir; tanımdan çıkarmak: "
+        f"virsh -c {URI} edit {name} (cdrom bloğu silinir).")
+    say(f"  Denetim adla eşleşir (unattend.iso); başka adla hazırlanmış bir "
+        f"cevap diski buradan görünmez.")
+    if confirmed:
+        return
+    deliberate = self_cmd(*redacted_argv(), "--confirm-unattended")
+    if not sys.stdin.isatty():
+        die(f"onay sorulacak bir terminal yok. Bilerek isteniyorsa: "
+            f"{deliberate}")
+    if input(f"  {address} yine de eklensin mi? Onaylamak için EVET yazın > "
+             ).strip() != "EVET":
+        die("onaylanmadı -- hiçbir şey yapılmadı.")
+
+
 def cmd_nvme(a):
     """Give a whole NVMe controller to a shut-off domain, take it back, or ask.
 
@@ -1511,6 +1580,10 @@ def cmd_nvme(a):
         if blocks:
             say(f"'{a.name}' {address}'i zaten alıyor -- değişiklik yok")
             return 0
+        # After the no-change return on purpose: a domain that already takes
+        # the controller gains no risk from being asked about it again.
+        guard_unattended_answer_file(a.name, xml, address,
+                                     getattr(a, "confirm_unattended", False))
         xml = xml.replace("  </devices>",
                           nvme_hostdev_xml(address) + "  </devices>", 1)
 
@@ -3500,6 +3573,9 @@ def main(argv: list[str] | None = None) -> int:
                     help="devredilecek denetleyicinin PCI adresi (0000:02:00.0)")
     nv.add_argument("--detach", metavar="PCI", default="",
                     help="domain'den çıkarılacak denetleyicinin PCI adresi")
+    nv.add_argument("--confirm-unattended", action="store_true",
+                    help="cevap dosyası ISO'su takılıyken de ekle "
+                         "(terminalsiz koşu için; EVET sorusunun yerine geçer)")
     nv.set_defaults(func=cmd_nvme)
 
     pt = sub.add_parser("passthrough", help="kartı domain'e ver ya da geri al")

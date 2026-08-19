@@ -123,6 +123,12 @@ yumuşak ölçütleri tek tek raporlar; eşleşmezse donanımı keşfeder ve pro
 yazmaya değip değmeyeceğini söyler. Çıkış kodu: 0 kapı açık, 1 kapalı,
 2 böyle bir profil yok.
 
+**Sert ölçütün üç hâli var, ikisi değil.** Ölçülemeyen bir sert ölçüt kapıyı
+kapatmaz — MUX özniteliği sürücüsüyle gelir ve modül yüklü değilken dosya hiç
+doğmaz; onu "geçmedi" saymak, donanımı hiç değişmemiş makinede aracı durdurmak
+olurdu. Ama "geçti" de sayılmaz: rapor bu ölçütleri kendi başlığı altında
+sayar, ve kapı açıkken bile *"ölçülemeyen var"* der.
+
 Ayrı bir bölüm de **seans yarısını** ölçer: seat0'daki etkin oturum, kartı
 tutan bir süreç olup olmadığı, ve iGPU symlink'i. Bu denetimler **kapıyı
 etkilemez** ve ölçülemediklerinde "geçmedi" değil **"ölçülemedi"** derler —
@@ -234,6 +240,22 @@ misafir yapar.
 denetleyici yapmak ayrı bir yoldur ve `build`'in bayrağıdır → "İki kurulum
 kipi". Denetleyici bir kez oraya yazıldıysa bu komut onu **çıkarmaz**: sistem
 diski domain'den ancak domain'le birlikte ayrılır (`clean`).
+
+**Cevap dosyası ISO'su hâlâ takılıysa `--attach` sorar.** ISO'yu `build` takar
+ve hiçbir komut geri çıkarmaz; autounattend `DiskID 0`'ı `WillWipeDisk` ile
+siler ve şablonun kendi gerekçesi *"DiskID 0 domain'deki tek disktir"* —
+ikinci bir fiziksel disk tam da o varsayımı kaldırır. Sıranın ne olacağı bu
+makinede **ölçülmedi**, o yüzden komut reddetmiyor: durumu söylüyor ve
+`build --system-nvme`'nin kullandığı EVET onayını istiyor (terminalsiz koşu
+için `--confirm-unattended`).
+
+**`--detach` yalnız bu aracın bıraktığı satırı siler.** `managed='no'` kart
+bloğunu reddeder — onu devir hook'u bağlar (K8). `managed='yes'` bir bloğu ise
+ancak iki işaretten biri varsa siler: kimlik kaydı o adresi adlandırıyorsa, ya
+da adres hâlâ bir NVMe denetleyicisi taşıyorsa. Adreste hiç cihaz yoksa da
+siler (bayat satır tam olarak budur). Geriye kalan tek hâl — kaydı yok **ve**
+adreste başka bir canlı cihaz var, ör. başka bir aracın taktığı ağ kartı —
+reddedilir ve `virsh edit`'e yollar.
 
 **Hep ya hiç, ve bunu donanım söylüyor.** PCI devri bütün IOMMU grubunu taşır,
 denetleyicinin yarısı diye bir şey yok. Diskin bir kısmı host'ta kalacaksa cevap
