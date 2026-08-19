@@ -3445,7 +3445,15 @@ def cmd_build(a):
             # aimed at the wrong domain and its image.
             die(f"'{a.name}' zaten tanımlı. Önce: "
                 f"{self_cmd('guest', '--name', a.name, 'clean')}")
-        cmd_clean(a)
+        # ALREADY ASKED, AND ONLY WHEN IT IS THE SAME DRIVE. system_nvme_target
+        # printed this controller's model and serial a few lines up and, for a
+        # wiping round, took an EVET for it; asking a second time about the
+        # definition that points at it is noise. A round aimed anywhere else --
+        # another controller, or mode 1 replacing a mode-2 guest -- confronted
+        # the user with nothing, and that is exactly the case the gate is for.
+        existing = system_nvme_of(a.name)
+        cmd_clean(a, confirmed=bool(existing and system_nvme
+                                    and existing[0].lower() == system_nvme))
 
     workdir = IMAGES / f"{a.name}-unattend"
     if adopt:
@@ -3797,7 +3805,56 @@ def cmd_eject(a):
     return 0
 
 
-def cmd_clean(a):
+def confirm_undefine(a, address: str, note: dict[str, str], deliberate: str) -> None:
+    """Ask before dropping the only definition that names a system on hardware.
+
+    WHY THIS GATE EXISTS, AND WHY IT IS A QUESTION RATHER THAN A REFUSAL. The
+    mark says this tool defined the domain; it does not say the domain is still
+    disposable, and the premise that the two are the same broke the moment a
+    guest this tool built was promoted to daily use. The whitelist could not
+    see that -- `role="test-guest"` is a constant in the template, carried by
+    every domain in every mode, so reading it re-derives the fact it already
+    had (<built-by> is there) and separates nothing.
+
+    What DOES separate them is already recorded: the system-disk record. In
+    mode 1 the domain and the image are one object -- `clean` deletes both and
+    that is the command's purpose. In mode 2 the domain is a handle to a system
+    this tool did not put there and cannot put back; dropping it strands a
+    bootable drive that nothing on the machine names any more, which is the
+    state the comment in cmd_clean has always warned about.
+
+    A refusal would be too strong for what was measured: the drive is untouched
+    and the definition is reproducible (--adopt, then passthrough for the card),
+    so the cost of the accident is a rebuild and not an install. It must simply
+    not happen silently. The shape is deliberately the one system_nvme_target()
+    already uses for the other path that faces a physical drive -- identity
+    printed, EVET typed, a flag for the unattended run, a refusal with no tty.
+    """
+    ident = " ".join(x for x in (note.get("model"), note.get("serial")) if x)
+    say(f"'{a.name}'in sistemi FİZİKSEL BİR DİSKTE: "
+        f"{ident or '(kimlik kaydı eksik)'} @ {address}")
+    say("  bu komut o diske YAZMAZ -- giden şey domain tanımı ve NVRAM'i, "
+        "diskin içeriği olduğu gibi kalır.")
+    say(f"  geri almak: {self_cmd('guest', '--name', a.name, 'build', '--adopt', '--system-nvme', address)}"
+        f" -- kart da devrediliyorsa arkasından "
+        f"{self_cmd('guest', '--name', a.name, 'passthrough')}")
+    if not sys.stdin.isatty():
+        die(f"onay sorulacak bir terminal yok. Bilerek isteniyorsa: {deliberate}")
+    if input(f"  '{a.name}' tanımı kaldırılsın mı? Onaylamak için EVET yazın > "
+             ).strip() != "EVET":
+        die("onaylanmadı -- hiçbir şey yapılmadı.")
+
+
+def cmd_clean(a, *, confirmed: bool = False):
+    """Remove what this tool made for a domain, after asking when it must.
+
+    `confirmed` is for the caller that has ALREADY put this drive's identity in
+    front of the user in this same round -- build --force does, when the drive
+    it is about to install onto is the one the existing domain boots from. It
+    is a statement about a fact, not a re-reading of somebody else's flag: the
+    lesson that split --confirm-wipe off from --yes is that a consent typed for
+    one question must not answer a different one, and that lesson holds here.
+    """
     disk = owned_image(a)
     guard(a.name, disk)
 
@@ -3805,6 +3862,15 @@ def cmd_clean(a):
     # operating system is on a controller, and `undefine` takes it away with
     # the domain -- after that the drive is a disk nobody can name.
     system = system_nvme_of(a.name) if domain_exists(a.name) else None
+
+    # THE MARK DECIDED WHETHER WE MAY; THE RECORD DECIDES WHETHER WE ASK. Both
+    # subcommands that reach here carry the flag, so the printed hint resolves
+    # whichever one is running (K20) -- and it is the same question in both,
+    # which is what keeps one flag honest across two parsers.
+    if system and not confirmed and not getattr(a, "confirm_undefine", False):
+        confirm_undefine(a, *system,
+                         deliberate=self_cmd(*redacted_argv(),
+                                             "--confirm-undefine"))
 
     if domain_exists(a.name):
         if domain_state(a.name) != "shut off":
@@ -3907,6 +3973,14 @@ def main(argv: list[str] | None = None) -> int:
     b.add_argument("--confirm-wipe", action="store_true",
                    help="--system-nvme'nin disk onayını sorma "
                         "(yalnız diski kapsar; düz VT onayı ayrıdır)")
+    # Same question as `clean`'s, and that is why one name serves both: the
+    # trap this workspace paid for was a flag whose meaning CHANGED when a
+    # second subcommand read it. Here --force runs cmd_clean outright, so the
+    # flag answers the identical question in both parsers.
+    b.add_argument("--confirm-undefine", action="store_true",
+                   help="sistemi fiziksel diskte olan bir domain'in tanımı "
+                        "kaldırılırken onay sorma (yalnız tanımı kapsar; "
+                        "diske hiçbir kipte yazmaz)")
     b.add_argument("--gpu-name", default="",
                    help="VDD'nin render edeceği bağdaştırıcı (boşsa misafirde keşfedilir)")
     b.set_defaults(func=cmd_build)
@@ -3967,6 +4041,10 @@ def main(argv: list[str] | None = None) -> int:
     pt.set_defaults(func=cmd_passthrough)
 
     c = sub.add_parser("clean", help="domain + disk + çalışma dizini sil")
+    c.add_argument("--confirm-undefine", action="store_true",
+                   help="sistemi fiziksel diskte olan bir domain'in tanımı "
+                        "kaldırılırken onay sorma (yalnız tanımı kapsar; "
+                        "diske hiçbir kipte yazmaz)")
     c.set_defaults(func=cmd_clean)
 
     a = p.parse_args(argv)

@@ -329,14 +329,25 @@ birlikte ayrılır (`clean`).
 ### Geri alma
 
 ```sh
-vfioctl guest --name win11-nvme passthrough --off   # kartı domain'den çıkar
-vfioctl guest --name win11-nvme clean               # domain + çalışma dizini sil
+vfioctl guest --name win11-test passthrough --off   # kartı domain'den çıkar
+vfioctl guest --name win11-test clean               # domain + çalışma dizini sil
 vfioctl uninstall                                   # host tarafını geri al
 ```
 
+**Örnekteki ad `win11-test`, ve bu bilerek:** `clean` yıkıcı komuttur, örneği
+okuyup adı değiştirmeden yapıştıran biri deneme misafirini kaybetmelidir,
+günlük olanı değil.
+
 `clean` **fiziksel diske dokunmaz** — kip 2 ile kurulmuş bir diski kimliğiyle
-raporlar ve bırakır. Üstünde çalışan bir Windows kalan diski daha sonra geri
-almak için:
+raporlar ve bırakır. Ama **tanımı kaldırır**, ve kip 2'de tanım o diskteki
+sistemi adıyla anan tek şeydir; o yüzden sistem diski fiziksel olan bir
+domain'de `clean` önce **onay sorar** — diskin modeli ve serisi basılır, `EVET`
+beklenir, terminal yoksa reddedilir. Gözetimsiz koşu için `--confirm-undefine`
+(yalnız tanımı kapsar; `clean` hiçbir kipte diske yazmaz). Kip 1'de soru
+sorulmaz: orada domain ile imaj aynı nesnedir ve ikisini birlikte silmek
+komutun amacıdır.
+
+Üstünde çalışan bir Windows kalan diski daha sonra geri almak için:
 
 ```sh
 vfioctl guest --name win11-nvme build --adopt --system-nvme 0000:02:00.0
@@ -372,7 +383,7 @@ silinmez, listelenir.
 | `guest eject` | kurulum ortamını sürücüden çıkarır | domain tanımı |
 | `guest autologon` | konsol oturumunu açar | misafir kaydı |
 | `guest status` / `screenshot` | durum / ekran görüntüsü | hayır |
-| `guest clean` | domain + çalışma dizini siler | siler |
+| `guest clean` | domain + çalışma dizini siler | siler (sistem diski fiziksel ise önce onay sorar) |
 
 Her komutun kendi yardımı var: `vfioctl <komut> --help`,
 `vfioctl guest <komut> --help`.

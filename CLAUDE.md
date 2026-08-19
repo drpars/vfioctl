@@ -80,19 +80,25 @@ Kapının geri kalan olguları, sınıfından bağımsız:
   mekanizma **kaldırıldı**, ikisi bugün de korunuyor ama sebebi başka —
   `win11` elle kurulduğu için **işaretsiz**, ve imajını `win11` bağlıyor.
   Denemeler `win11-test` üzerinde yapılır.
-- **⚠ AÇIK, ve ters yönde: bu ölçüt bugün çalışan misafiri KORUMUYOR.**
-  `win11-nvme` bu araç tarafından inşa edildiği için `<built-by
-  role="test-guest"/>` taşıyor ve `guard()`'ı **geçiyor**; üstelik kip 2
-  domain'i olduğu için dosya diski yok, yani imaj yarısı onun için tümüyle
-  sessiz — karar veren tek şey işaret. Beyaz listenin öncülü *"inşa ettiğimiz
-  atılabilir"*di ve kullanıcı o misafiri günlük sürücüye terfi ettirince
-  bozuldu. Bu satır bir izin değil **uyarı**: `guard()`'ın geçmesi, arkasındaki
-  adımın zararsız olduğunu söylemez — hangi adımın ne yaptığı ayrıca okunur
-  (`clean` tanımı kaldırır, diski kimliğiyle raporlar ve **silmez**;
-  `build --system-nvme` denetleyiciyi **yeniden bölümler** ve kendi son kapısı
-  insandır: model + seri basılır, `EVET` beklenir, `--confirm-wipe` ile
-  geçilir, tty yoksa reddedilir). Kararı bekleyen soru: "hangisi kıymetli"
-  neye bağlanmalı → `pars/vfioctl/DEVIR.md`.
+- **İşaret "yapabilir miyiz"i cevaplar, "sormalı mıyız"ı DEĞİL** — ve ikincisini
+  cevaplayan şey sistem diski kaydıdır. `guard()`'ın geçmesi, arkasındaki adımın
+  zararsız olduğunu söylemez; hangi adımın ne yaptığı ayrıca okunur:
+  - `clean` tanımı kaldırır, diski kimliğiyle raporlar ve **silmez**. Ama kip
+    2'de tanım, o diskteki sistemi adıyla anan tek şeydir — bu yüzden
+    `<nvme … role="system"/>` taşıyan domain'de **onay sorar** (model + seri
+    basılır, `EVET` beklenir, `--confirm-undefine` ile geçilir, tty yoksa
+    reddedilir). Kip 1'de sormaz: orada domain ile imaj aynı nesnedir.
+  - `build --system-nvme` denetleyiciyi **yeniden bölümler**; kendi son kapısı
+    aynı biçimdedir (`--confirm-wipe`). `build --force` `clean`'i çağırır ve
+    kapı orada da geçerlidir — yalnız turun kendi hedefi zaten var olan
+    domain'in sistem diskiyse ikinci kez sorulmaz.
+- **Neden ad ya da rol değil.** `role="test-guest"` şablonda **sabittir**
+  (`guest/templates/domain.xml`): aracın tanımladığı her domain onu alır, her
+  kipte, kuran turda da `--adopt` turunda da. Yani bir rol değil, `<built-by>`
+  varlığının ikinci kopyası — okunması hiçbir şeyi ayırmaz. Beyaz listenin
+  öncülü *"inşa ettiğimiz atılabilir"*di ve kullanıcı `win11-nvme`'yi günlük
+  sürücüye terfi ettirince bozuldu; kullanım değişti, kayıt değil. Ölçüt
+  bu yüzden aracın **zaten tuttuğu** olguya bağlandı (2026-08-20).
 - **Kartın bind yollarında tek yazar vardır ve o hook'tur.** Hiçbir alt komut
   kartı bağlamaz, çözmez, probe etmez; `install` dosya yazar, `selftest` misafir
   başlatıp okur. İkinci bir yazar, bu makineyi üç kez kilitleyen yolun ta
