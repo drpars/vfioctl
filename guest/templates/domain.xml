@@ -39,9 +39,11 @@
   the handed-over namespace as a boot candidate rather than merely seeing the
   controller (measured 2026-08-19: the boot manager lists it by model and
   controller serial, with no ESP on the drive, while Setup sees exactly one
-  disk, Disk 0). WHAT IS STILL UNMEASURED IS THE INSTALL ITSELF: no Windows has
-  ever been written to a handed-over controller from here, so mode 2 is a path
-  whose ends are measured and whose middle is not.
+  disk, Disk 0). THE MIDDLE IS MEASURED TOO NOW (2026-08-19): an unattended
+  install ran to completion onto a handed-over controller in 8 min 8 s, the
+  guest reports that drive as Disk 0 with IsBoot and IsSystem both true over a
+  four-partition GPT layout, and with every CD-ROM empty it boots from there in
+  10 s. Both ends and the middle: mode 2 is a measured path.
 
   WHAT IS DELIBERATELY MISSING, AND WHY. This domain does not passthrough the
   dGPU. The question this round answers is "does autounattend.xml produce a

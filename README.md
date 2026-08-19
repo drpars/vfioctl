@@ -430,8 +430,14 @@ duruyor; domain'in `<metadata>`'sı devredilen denetleyicinin kimliğini
 sonda domain'iyle): OVMF namespace'i **önyükleme adayı olarak listeliyor**
 (`UEFI <model> <seri> 1`, üstünde ESP olmadığı hâlde), ve Windows Setup'ın
 gördüğü **tek** disk `Disk 0` — yani cevap dosyasının hedefi devredilen
-denetleyicidir. **Hâlâ ölçülmeyen: kurulumun kendisi** — bu yoldan bir
-denetleyiciye Windows kurulup oradan açılmadı.
+denetleyicidir. **Kurulumun kendisi de ölçüldü** (2026-08-19): gözetimsiz tur
+devredilen denetleyiciye **8 dk 8 sn**'de tamamlandı, misafir o diski `Disk 0`
+olarak `IsBoot`+`IsSystem` ile dört bölümlü GPT üstünde gösteriyor, ve kurulum
+ortamı çıkarıldıktan sonra **hiç CD yokken 10 sn**'de oradan açılıyor.
+Aynı turda ölçülen ikinci şey: kip 2'de **üç virtio sürücüsünden ikisi**
+gerekiyor — `NetKVM` (ağ) ve `vioserial` (ajanın kanalı) bir cihaza bağlanıyor,
+`viostor` sürücü deposunda kalıyor ve hiçbir cihaz talep etmiyor, çünkü diski
+Windows'un kutu içi `stornvme`'i sürüyor.
 
 **Kurulum diski siler, ve son kapı insandır.** Cevap dosyası `DiskID 0`'ı baştan
 bölümlüyor. Envanterin `✓`'i *"host onun üstünde durmuyor"* demektir, **"boş"
@@ -567,9 +573,9 @@ Faz 4'ün iki yarısı birbirinin küçük kardeşi değil, ayrı iki mekanizma.
 misafir kapanınca geri alınır. **Disk devri** ise kalıcı tanıma ait ve K14'ün sert
 korumasının muhatabı o; misafir denetleyiciyi boş bir disk olarak görür.
 Reddetme yolu envanterde yazılı ve ölçülü. Sistem diskini fiziksel NVMe yapan
-kurulum kipi (`build --system-nvme`) yazıldı; firmware ve Setup yakası
-2026-08-19'da gerçek bir boot ile ölçüldü, **kurulumun kendisi hâlâ
-koşulmadı** → "İki kurulum kipi". Aynı kipin geri yönü de yazıldı: `--adopt`
+kurulum kipi (`build --system-nvme`) yazıldı ve 2026-08-19'da **uçtan uca
+ölçüldü**: firmware ve Setup yakası, kurulumun kendisi, ve ortamsız açılış →
+"İki kurulum kipi". Aynı kipin geri yönü de yazıldı: `--adopt`
 kurulu bir diski sahiplenir ve diske hiç yazmaz → "Üçüncü tur".
 
 Faz 3'ün kabul ölçütü bu makinede karşılandı: kartsız prova ve kartlı tur geçti
