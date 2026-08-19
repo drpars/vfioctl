@@ -283,6 +283,109 @@ claims_dgpu() {
     return 1
 }
 
+# --- the nvme identity audit ----------------------------------------------
+#
+# LOG ONLY. Nothing here binds, unbinds, refuses or exits nonzero, and that is
+# a decision rather than an oversight. `nvme --attach` writes a bare PCI
+# address into a domain and libvirt binds whatever sits there at start time,
+# managed='yes', i.e. taking it off the host by itself. If the machine has
+# renumbered since -- this one did, eight addresses moved when a disk was
+# swapped -- that address can be a different controller, the host's boot disk
+# included. The Python side refuses on the paths this tool opens; this is the
+# half that sees `virsh start` and virt-manager too, because everything passes
+# through here.
+#
+# WHY IT ONLY LOGS FOR NOW. A nonzero exit from prepare/begin means the guest
+# does not start. A refusing check that is wrong therefore means no VM starts
+# on this machine at all, this file is the riskiest one in the tool, and the
+# repo has no unit tests to catch it. What the refusal would be protecting
+# against has never been observed -- and could not have been: `guest nvme` was
+# written one day after the renumbering event, so the exposure is a day old.
+# The log is what produces the evidence that would justify turning this into a
+# refusal; until then it costs a line in a file.
+#
+# The read is the same shape as the gate's: normalise to one tag per line and
+# read attributes by name, because libvirt wraps long elements and the record
+# carries four attributes.
+nvme_records() {
+    tr '\n' ' ' | sed 's/>/>\n/g' | sed -n 's/.*<[a-zA-Z0-9_.-]*:\{0,1\}nvme[[:space:]]/nvme /p'
+}
+
+# THE LADDER IS ORDERED BY WHAT STAYS READABLE. vendor/device and the PCI class
+# live in config space and the kernel shows them under any driver, vfio-pci
+# included; model and serial come from a directory the nvme driver creates, so
+# they are gone for as long as a guest holds the controller. Checking the
+# serial first would make "a guest has it" and "this address is an Ethernet
+# controller now" arrive looking identical -- and the second one is the whole
+# reason this exists. Measured: 04:00.0 was an NVMe slot on this machine and is
+# a Realtek 8125 today, with model and serial reading empty exactly like a
+# handed-over drive.
+# Check mode forces VFIO_LOG to /dev/null so that exercising the gate cannot
+# write into the record. That is right, and it is also why the audit has to
+# speak twice: the log is where the evidence accumulates, stdout is the only
+# place a verification run can be read from.
+_audit_say() {
+    log "nvme audit: $*"
+    if [ -n "${VFIO_HOOK_CHECK:-}" ]; then
+        printf 'nvme audit: %s\n' "$*"
+    fi
+    return 0
+}
+
+
+nvme_audit() {
+    local xml=$1 line addr want_ids want_serial want_model
+    local base ids class serial verdict
+    printf '%s' "$xml" | nvme_records | while IFS= read -r line; do
+        # Through canon_addr rather than straight out of the attribute: the
+        # value becomes a path under /sys and this script runs as root. It also
+        # canonicalises, so a record written as 02:00.0 and one written as
+        # 0000:02:00.0 name the same device.
+        addr=$(canon_addr "$(_attr address "$line")") || {
+            _audit_say "unreadable address in the record -- ignored"
+            continue
+        }
+        [ -n "$addr" ] || continue
+        want_ids=$(_attr ids "$line")
+        want_model=$(_attr model "$line")
+        want_serial=$(_attr serial "$line")
+
+        base="$SYSFS_PCI/devices/$addr"
+        if [ ! -d "$base" ]; then
+            _audit_say "$addr ABSENT -- no device at that address (recorded ${want_model:-?} ${want_serial:-?})"
+            continue
+        fi
+
+        class=$(cat "$base/class" 2>/dev/null) || class=""
+        ids=""
+        if [ -r "$base/vendor" ] && [ -r "$base/device" ]; then
+            ids="$(sed 's/^0x//' "$base/vendor" 2>/dev/null):$(sed 's/^0x//' "$base/device" 2>/dev/null)"
+        fi
+
+        verdict=""
+        case $class in
+            0x0108*) ;;
+            *) verdict="MISMATCH -- not an NVMe controller any more (class ${class:-?}, ${ids:-?})" ;;
+        esac
+        if [ -z "$verdict" ] && [ -n "$want_ids" ] && [ -n "$ids" ] && [ "$want_ids" != "$ids" ]; then
+            verdict="MISMATCH -- model ids changed (recorded $want_ids, now $ids)"
+        fi
+        if [ -z "$verdict" ]; then
+            serial=$(cat "$base"/nvme/nvme*/serial 2>/dev/null | head -n1) || serial=""
+            serial=${serial% }
+            serial=$(printf '%s' "$serial" | sed 's/[[:space:]]*$//')
+            if [ -z "$serial" ]; then
+                verdict="opaque -- serial unreadable (device handed over or nvme not bound); ids match ${ids:-?}"
+            elif [ -n "$want_serial" ] && [ "$want_serial" != "$serial" ]; then
+                verdict="MISMATCH -- serial changed (recorded $want_serial, now $serial)"
+            else
+                verdict="ok -- ${want_model:-?} $serial"
+            fi
+        fi
+        _audit_say "$addr $verdict"
+    done
+}
+
 # Verification mode. The gate above is the part that cannot be proven by
 # reading it, so it is runnable on its own against a real domain:
 #
@@ -295,6 +398,7 @@ if [ -n "${VFIO_HOOK_CHECK:-}" ]; then
     _seen=$(printf '%s' "$_xml" | hostdev_addresses | sort -u | tr '\n' ' ')
     printf 'configured: %s\n' "$DEVICES"
     printf 'hostdev:    %s\n' "${_seen:-(none)}"
+    nvme_audit "$_xml"
     if claims_dgpu "$_xml"; then
         printf 'result:     handover\n'
         exit 0
@@ -638,6 +742,13 @@ release_vfio() {
 }
 
 xml=$(cat)
+
+# BEFORE the card gate, deliberately. claims_dgpu exits 0 for a domain that
+# wants no dGPU, and a mode-2 guest booting off a passed-through NVMe with no
+# card is exactly such a domain -- the population this audit exists for would
+# otherwise never reach it. It logs and returns; it cannot refuse a start.
+[ "$OP/$SUBOP" = "prepare/begin" ] && nvme_audit "$xml"
+
 claims_dgpu "$xml" || exit 0
 
 case "$OP/$SUBOP" in
