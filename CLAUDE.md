@@ -72,9 +72,27 @@ Kapının geri kalan olguları, sınıfından bağımsız:
 
 ## Dokunulmaz olanlar
 
-- **`win11` domain'i ve `~/.images/win11.qcow2`** — çalışan misafir. Yıkıcı yol
-  ona **ad ve disk yoluyla** kapalı (`guest/build.py`), koruma kaldırılmaz.
+- **Yıkıcı yolun ölçütü ADIN DEĞİL İŞARETİN kendisidir** (`guard()`,
+  `guest/build.py`): metadata'sında `<built-by>` **taşımayan** tanımlı domain,
+  adı ne olursa olsun reddedilir; ayrıca başka bir domain'in bağladığı bir
+  imaja `--disk` ile işaret eden tur da reddedilir. Eski kural burada "`win11`
+  + `~/.images/win11.qcow2`, ad ve disk yoluyla kapalı" diye yazıyordu; o
+  mekanizma **kaldırıldı**, ikisi bugün de korunuyor ama sebebi başka —
+  `win11` elle kurulduğu için **işaretsiz**, ve imajını `win11` bağlıyor.
   Denemeler `win11-test` üzerinde yapılır.
+- **⚠ AÇIK, ve ters yönde: bu ölçüt bugün çalışan misafiri KORUMUYOR.**
+  `win11-nvme` bu araç tarafından inşa edildiği için `<built-by
+  role="test-guest"/>` taşıyor ve `guard()`'ı **geçiyor**; üstelik kip 2
+  domain'i olduğu için dosya diski yok, yani imaj yarısı onun için tümüyle
+  sessiz — karar veren tek şey işaret. Beyaz listenin öncülü *"inşa ettiğimiz
+  atılabilir"*di ve kullanıcı o misafiri günlük sürücüye terfi ettirince
+  bozuldu. Bu satır bir izin değil **uyarı**: `guard()`'ın geçmesi, arkasındaki
+  adımın zararsız olduğunu söylemez — hangi adımın ne yaptığı ayrıca okunur
+  (`clean` tanımı kaldırır, diski kimliğiyle raporlar ve **silmez**;
+  `build --system-nvme` denetleyiciyi **yeniden bölümler** ve kendi son kapısı
+  insandır: model + seri basılır, `EVET` beklenir, `--confirm-wipe` ile
+  geçilir, tty yoksa reddedilir). Kararı bekleyen soru: "hangisi kıymetli"
+  neye bağlanmalı → `pars/vfioctl/DEVIR.md`.
 - **Kartın bind yollarında tek yazar vardır ve o hook'tur.** Hiçbir alt komut
   kartı bağlamaz, çözmez, probe etmez; `install` dosya yazar, `selftest` misafir
   başlatıp okur. İkinci bir yazar, bu makineyi üç kez kilitleyen yolun ta
