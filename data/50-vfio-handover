@@ -184,10 +184,22 @@ _attr() {
 # The values reach $(( )) only after _hex_ok, because arithmetic expansion
 # evaluates its argument as an expression and would run a command substitution
 # hidden inside it.
+# BASE 16 IS SPELLED OUT, and it has to be. $((08)) is not eight in bash -- a
+# leading zero means octal, 8 and 9 are not octal digits, and the shell answers
+# "value too great for base" and fails the substitution. libvirt's own
+# attributes arrive as 0x08 and survive that, but vfio.conf carries bare
+# addresses (install writes 0000:01:00.0), so on a board whose card sits at bus
+# or slot 08 or 09 canon_addr failed and the die() below it fired -- before the
+# op gate, i.e. for every hook call, i.e. no guest on that machine would start
+# at all. Measured 2026-08-19; this board has 0000:00:08.x, so the input shape
+# is ordinary hardware and not a corner case.
+_dehex() { local v=${1#0[xX]}; printf '%d' "$((16#$v))"; }
+
 canon() {
     local d=${1:-0} b=${2:-} s=${3:-} f=${4:-}
     _hex_ok "$d" && _hex_ok "$b" && _hex_ok "$s" && _hex_ok "$f" || return 1
-    printf '%04x:%02x:%02x.%x' "$((d))" "$((b))" "$((s))" "$((f))"
+    printf '%04x:%02x:%02x.%x' \
+        "$(_dehex "$d")" "$(_dehex "$b")" "$(_dehex "$s")" "$(_dehex "$f")"
 }
 
 # 0000:01:00.0 / 01:00.0 -> canonical form
