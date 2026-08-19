@@ -98,7 +98,30 @@ set -uo pipefail
 # without touching the installed configuration -- see VFIO_HOOK_CHECK below.
 : "${VFIO_CONF:=/etc/libvirt/hooks/vfio.conf}"
 
-[ -r "$VFIO_CONF" ] || exit 0
+# THE CHECK MODE'S THIRD ANSWER, AND WHY IT NEEDED ONE. Its contract is the
+# exit code (see VFIO_HOOK_CHECK below), and it had exactly two: 0 = would hand
+# the card over, 1 = would not. The arms that leave before DEVICES exists --
+# no readable vfio.conf, an empty device list, an address that will not
+# canonicalise -- all fell out through the plain `exit 0` the live path needs,
+# so an unconfigured hook answered the question with the same code as one that
+# was about to move the card. Nothing was printed either, so a caller matching
+# on the printed line and a caller reading $? disagreed about which was safe.
+#
+# THE LIVE PATH IS NOT TOUCHED BY THIS. At prepare/begin a non-zero exit means
+# the guest does not start, so those arms still exit 0; only the verification
+# mode gets the third code, and only when its variable is set. Callers outside
+# check mode never reach the helper's body.
+_check_unconfigured() {
+    [ -n "${VFIO_HOOK_CHECK:-}" ] || return 0
+    # The caller is writing the domain XML into our stdin; take it so the
+    # verdict is not raced by a broken pipe on their side.
+    cat >/dev/null 2>&1 || :
+    printf 'configured: (none) -- %s\n' "$1"
+    printf 'result:     unconfigured\n'
+    exit 2
+}
+
+[ -r "$VFIO_CONF" ] || { _check_unconfigured "no readable $VFIO_CONF"; exit 0; }
 # shellcheck source=/dev/null
 . "$VFIO_CONF"
 
@@ -165,7 +188,11 @@ die() {
     exit 1
 }
 
-[ -n "$VFIO_DEVICES" ] || { log "vfio.conf lists no devices; nothing to do"; exit 0; }
+[ -n "$VFIO_DEVICES" ] || {
+    _check_unconfigured "$VFIO_CONF lists no devices"
+    log "vfio.conf lists no devices; nothing to do"
+    exit 0
+}
 
 # --- address handling ------------------------------------------------------
 #
@@ -215,7 +242,13 @@ canon_addr() {
 
 DEVICES=""
 for _dev in $VFIO_DEVICES; do
-    _canon=$(canon_addr "$_dev") || die "vfio.conf: '$_dev' is not a PCI address"
+    # This arm is the one that is NOT "nothing to do": in the live path it dies,
+    # and it dies before the op gate, so no guest starts at all on this host.
+    # Reporting that as "no handover" would be an answer to the wrong question.
+    _canon=$(canon_addr "$_dev") || {
+        _check_unconfigured "vfio.conf: '$_dev' is not a PCI address"
+        die "vfio.conf: '$_dev' is not a PCI address"
+    }
     DEVICES="${DEVICES:+$DEVICES }$_canon"
 done
 
@@ -386,19 +419,86 @@ nvme_audit() {
     done
 }
 
+# THE POPULATION THE AUDIT ABOVE MISSES IS THE ONE IT WAS WRITTEN FOR. A record
+# is something only this tool writes (guest/build.py record_nvme), so auditing
+# recorded addresses audits exactly the domains that already passed the Python
+# guard on the way in. A hand-defined domain arrives with no record at all:
+# nvme_records() yields nothing, the loop never runs, and "looked and was
+# happy" and "never looked" are byte for byte the same log.
+#
+# WHAT IS ASKED IS NOT "IS THIS AN NVMe" BUT "IS THE HOST STANDING ON IT". The
+# PCI class alone would wave a SATA or a RAID controller through, and an
+# unrecorded address has nothing for the identity ladder to compare against
+# anyway. The one fact that decides whether a start costs this machine its root
+# filesystem is readable from sysfs alone. Measured on this machine: the tool's
+# own written protocol still named 0000:05:00.0 as the address to check for,
+# from a time when that was the card's GUEST-side slot -- after the disk swap
+# it is the controller carrying /, /home and /efi, and a hand-written hostdev
+# is what would hand it to libvirt with managed='yes'.
+#
+# AN EMPTY ANSWER IS NOT "SAFE" AND IS NOT PRINTED AS ONE. An LVM or LUKS root
+# resolves to /sys/devices/virtual/block and has no PCI ancestor to find, so it
+# lands in the same branch as a genuinely idle controller; the wording says the
+# lookup did not resolve rather than that nothing is mounted.
+host_mounts_on() {
+    local addr=$1 dev mnt node real out=""
+    while read -r dev mnt _; do
+        case $dev in /dev/*) ;; *) continue ;; esac
+        node=$(readlink -f "$dev" 2>/dev/null) || continue
+        real=$(readlink -f "/sys/class/block/${node##*/}" 2>/dev/null) || continue
+        case $real in *"/$addr/"*) out="${out:+$out }$mnt" ;; esac
+    done < /proc/mounts
+    printf '%s' "$out"
+}
+
+nvme_unrecorded() {
+    local xml=$1 line recorded seen dev base class ids where
+    recorded=$(printf '%s' "$xml" | nvme_records \
+        | while IFS= read -r line; do canon_addr "$(_attr address "$line")"; done \
+        | tr '\n' ' ')
+    seen=$(printf '%s' "$xml" | hostdev_addresses | sort -u)
+    for dev in $seen; do
+        case " $recorded " in *" $dev "*) continue ;; esac
+        # The card is the population this file already owns, and skipping it
+        # positively rather than by device class keeps an ordinary win11 start
+        # from writing two noise lines on every boot.
+        case " $DEVICES " in *" $dev "*) continue ;; esac
+        base="$SYSFS_PCI/devices/$dev"
+        class=$(cat "$base/class" 2>/dev/null) || class=""
+        ids=""
+        if [ -r "$base/vendor" ] && [ -r "$base/device" ]; then
+            ids="$(sed 's/^0x//' "$base/vendor"):$(sed 's/^0x//' "$base/device")"
+        fi
+        where=$(host_mounts_on "$dev")
+        if [ -n "$where" ]; then
+            _audit_say "$dev UNRECORDED (class ${class:-?}, ${ids:-?}) -- HOST-MOUNTED $where"
+        else
+            _audit_say "$dev UNRECORDED (class ${class:-?}, ${ids:-?}) -- no mounted filesystem resolved to it (an LVM/LUKS root would not resolve here either)"
+        fi
+    done
+    return 0
+}
+
 # Verification mode. The gate above is the part that cannot be proven by
 # reading it, so it is runnable on its own against a real domain:
 #
 #   virsh dumpxml <guest> | VFIO_HOOK_CHECK=1 /etc/libvirt/hooks/qemu.d/50-vfio-handover
 #
 # Reads stdin, reports the decision, touches nothing. Exit 0 = would hand the
-# card over, 1 = would leave the driver binding alone.
+# card over, 1 = would leave the driver binding alone, 2 = nothing was decided,
+# because this host has no usable vfio.conf -- missing, unreadable, empty, or
+# carrying something that is not a PCI address. THE HOOK PROPER STILL EXITS 0
+# ON THE FIRST THREE, where 0 means "let the guest start" and is the opposite
+# kind of answer; on the fourth it exits 1 before the op gate, i.e. no guest
+# starts at all, which is why reporting either as "no handover" would be a true
+# sentence about the wrong question.
 if [ -n "${VFIO_HOOK_CHECK:-}" ]; then
     _xml=$(cat)
     _seen=$(printf '%s' "$_xml" | hostdev_addresses | sort -u | tr '\n' ' ')
     printf 'configured: %s\n' "$DEVICES"
     printf 'hostdev:    %s\n' "${_seen:-(none)}"
     nvme_audit "$_xml"
+    nvme_unrecorded "$_xml"
     if claims_dgpu "$_xml"; then
         printf 'result:     handover\n'
         exit 0
@@ -748,6 +848,7 @@ xml=$(cat)
 # card is exactly such a domain -- the population this audit exists for would
 # otherwise never reach it. It logs and returns; it cannot refuse a start.
 [ "$OP/$SUBOP" = "prepare/begin" ] && nvme_audit "$xml"
+[ "$OP/$SUBOP" = "prepare/begin" ] && nvme_unrecorded "$xml"
 
 claims_dgpu "$xml" || exit 0
 

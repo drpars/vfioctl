@@ -342,7 +342,9 @@ def gate_decision(domain: str) -> tuple[bool, str]:
     """Ask the installed hook what it would do with this domain. Writes nothing.
 
     A gate that never fires looks exactly like a hook that was never installed,
-    which is why the hook has a check mode at all.
+    which is why the hook has a check mode at all -- and why the hook answers
+    with three codes rather than two: 0 handover, 1 no handover, 2 nothing was
+    decided because there is no usable vfio.conf.
     """
     rc, xml = _virsh(["dumpxml", domain])
     if rc != 0:
@@ -356,7 +358,19 @@ def gate_decision(domain: str) -> tuple[bool, str]:
     except (OSError, subprocess.SubprocessError) as exc:
         return False, str(exc)
     text = (out.stdout + out.stderr).strip()
-    return "result:     handover" in out.stdout, text
+    if out.returncode == 2:
+        return False, (text + "\n-> hook yapılandırılmamış: vfio.conf yok, "
+                              "okunamıyor, cihaz listelemiyor ya da PCI adresi "
+                              "olmayan bir şey taşıyor")
+    # THE EXIT CODE IS THE CONTRACT AND THE PRINTED LINE IS WHAT A HUMAN READS,
+    # so this reads both and lets neither answer alone. Matching the line's
+    # exact spacing tied this to the hook's alignment column -- widening a
+    # label there would turn a working handover into a preflight refusal, and a
+    # wrong refusal costs more than a wrong warning. Anchored on purpose: an
+    # nvme audit line that merely quotes the word must not be able to answer
+    # for the gate.
+    return (out.returncode == 0
+            and re.search(r"^result:\s+handover$", out.stdout, re.M) is not None), text
 
 
 # --------------------------------------------------------------------------- #

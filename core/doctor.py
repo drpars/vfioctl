@@ -279,7 +279,9 @@ def _check_nvme_audit() -> Check:
     THIS IS THE HALF THAT CLOSES THE LOOP. The hook audits every start -- every
     `virsh start`, virt-manager included -- and only logs, because a refusing
     check in that file that is wrong means no guest starts on the machine at
-    all. Logging is only worth something if somebody reads it, and the only
+    all. Two populations reach it: addresses the tool recorded, judged against
+    the drive that is there now, and addresses nobody recorded, judged only on
+    whether the host has a filesystem mounted behind them. Logging is only worth something if somebody reads it, and the only
     reader until now was `selftest`, i.e. the mismatch was visible exactly to
     the people who were already running a full round. Here it costs a line.
 
@@ -302,8 +304,15 @@ def _check_nvme_audit() -> Check:
                      "hook günlüğünde NVMe kimlik uyuşmazlığı",
                      f"{log} okunamadı ({exc.strerror or exc})")
 
+    # HOST-MOUNTED IS A DIFFERENT KIND OF FAULT AND IT BELONGS IN THE SAME
+    # BUCKET. The other two are a record that stopped describing its drive; this
+    # one is a hostdev nobody recorded, pointing at a controller the host has
+    # filesystems on. Left out of this list the hook would write the line and
+    # doctor would still count it and report "uyuşmazlık yok" -- the audit's
+    # loudest sentence, invisible to its only reader.
     faults = [l for l in lines
-              if "nvme audit:" in l and ("MISMATCH" in l or "ABSENT" in l)]
+              if "nvme audit:" in l
+              and ("MISMATCH" in l or "ABSENT" in l or "HOST-MOUNTED" in l)]
     if not faults:
         audited = sum(1 for l in lines if "nvme audit:" in l)
         return Check("nvme-denetimi", SOFT, True,
@@ -315,8 +324,10 @@ def _check_nvme_audit() -> Check:
         "nvme-denetimi", SOFT, False,
         "hook günlüğünde NVMe kimlik uyuşmazlığı",
         f"{len(faults)} satır; sonuncusu: {faults[-1].strip()}",
-        remedy=f"kaydı tazele (guest --name <ad> nvme --detach/--attach) ya da "
-               f"tamamını oku: grep 'nvme audit' {log}",
+        remedy=f"HOST-MOUNTED satırı varsa o domain BAŞLATILMAZ: adres host'un "
+               f"dosya sistemi taşıyan bir denetleyicisi. Kimlik satırları için "
+               f"kaydı tazele (guest --name <ad> nvme --detach/--attach). "
+               f"Tamamı: grep 'nvme audit' {log}",
     )
 
 
