@@ -52,8 +52,17 @@ Bunun bir vaat değil bir **kapı** olması tasarımın parçası:
 
 - `doctor` her makinede koşar, hiçbir şey yazmaz, neyin uymadığını tek tek
   söyler — başka bir makineye taşımak isteyenin ihtiyacı budur.
-- Yazan hiçbir alt komut profil eşleşmesi olmadan koşmaz. `--force` yoktur:
-  yarı çalışan bir passthrough kurulumu, hiç kurulmamış olmaktan kötüdür.
+- Kartı devretmeyi mümkün kılan hiçbir alt komut profil eşleşmesi olmadan
+  koşmaz — `install`, `selftest`, `guest passthrough`, artı fiziksel bir diske
+  kuran `build --system-nvme`. `--force` yoktur: yarı çalışan bir passthrough
+  kurulumu, hiç kurulmamış olmaktan kötüdür.
+- Kapı yazan **her** komutta reddetmez: kurulanı **geri alan** yollar bilerek
+  geçer — `uninstall` sorar, kapalıysa söyler ve yine de koşar; `guest clean`
+  hiç sormaz. Yoksa sınıftan düşmüş bir makinede dosyalar mahsur kalırdı.
+  Host'un hiçbir şeyini hareket ettirmeyen `build --disk` de sormaz; sınıf dışı
+  makinede koşar, yalnızca Looking Glass'ı olmaz. Sorusunun daha sert sahibi
+  olan yollar (`guest nvme --attach`, `guest usb`) `inventory`'nin hükmüne
+  cevap verir.
 
 Kapsam dışı: tek GPU'lu makineler (host ekranını kaybeden **başka** bir
 tasarım), AMD dGPU'ların reset bug'ı.

@@ -16,10 +16,35 @@ Kullanıcıya basılan çıktı Türkçe.
 
 ## Kapı — bu projenin taşıyıcı ilkesi
 
-**Yazan hiçbir alt komut profil eşleşmesi olmadan koşmaz.** Tek soru sahibi
-`core.doctor.gate()`; yazan her komut ona sorar ve `False` gelirse durur.
-Kendi denetimini türeten komut yazılmaz — kapının tek olmasının sebebi, yeni
-bir alt komudun onu kazara atlayamaması.
+**Kendi denetimini türeten alt komut yazılmaz.** Tek soru sahibi
+`core.doctor.gate()` ve sorduğu soru tek: *bu makine aracın üstlendiği sınıf mı,
+ve kartını devredebilir mi?* Kapının tek olmasının sebebi, yeni bir alt komudun
+o soruyu **başka türlü** cevaplayamaması.
+
+**Kapıda reddedenler, "yazanlar"dan dar bir küme — ve fark eksiklik değil
+karar** (2026-08-19, kullanıcı kararı). **Dört komut reddeder:** doğruluğu
+cevabına bağlı olan `install`, `selftest`, `guest passthrough`; artı bilerek
+**ek fren** olarak `build --system-nvme` — kapının ölçütleri bir diski
+bölümlemenin güvenliği hakkında hiçbir şey söylemiyor, ama geri alınamayan tek
+yol o. `install --check` sorar ve yalnızca **uyarır**, çünkü hiçbir şey yazmaz.
+
+**Üç sınıf bilerek reddetmez, ve muafiyetler burada adlarıyla yazılır** — adı
+yazılmayan muafiyet, kuralı ilk aykırı komutta yalana çevirir:
+
+- **Geri alan yollar** — `uninstall` sorar, söyler ve **yine de koşar**;
+  `guest clean` hiç sormaz. Makine, `install` yazdıktan
+  *sonra* sınıftan düşebilir (MUX çevrilir, çekirdek özniteliği bırakır); red o
+  zaman aracın `/etc`'teki dosyalarını tam da onları kaldırmak isteyen makinede
+  mahsur bırakır.
+- **Host'un hiçbir şeyini hareket ettirmeyen yollar** — `build --disk` bir imaj
+  ve **kartsız** bir domain üretir. Sınıf dışı makinede koşar ve yalnızca
+  Looking Glass'sız kalır; `ivshmem_parts()` bunu düşmek yerine **söyler**.
+- **Sorusunun daha dar ve daha sert sahibi olan yollar** — ikisi de
+  `core.inventory`'ye: `guest nvme --attach` bayraksız K14 reddine, `guest usb`
+  `usb_verdict()`'in `REFUSE`'una cevap verir. Oraya ikinci ve daha geniş bir kapı koymak ikinci bir cevap olur;
+  sapan da kimsenin okumadığı olur.
+
+Kapının geri kalan olguları, sınıfından bağımsız:
 
 - **`--force` yok ve eklenmez.** Bayrak, "bunu henüz desteklemiyoruz"u "uyarmıştık"a
   çevirir; kapının var olma sebebi tam olarak o sonucu önlemek. Yarı çalışan bir

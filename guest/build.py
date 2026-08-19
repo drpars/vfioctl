@@ -54,9 +54,10 @@ named, so the rule holds on a machine whose working guest is not called win11.
 AND SINCE MODE 2 THAT SENTENCE NEEDED A SECOND HALF, BECAUSE THE TARGET CAN BE
 HARDWARE. `build --system-nvme` hands a physical controller to an unattended
 installer that repartitions it, and an image-claim check has nothing to say
-about a drive. What stands in its place, in order: core.doctor.gate(), because
-a new destructive path does not get to inherit the omission that `build` has
-never asked it; core.inventory's K14 refusal, which is flagless and answers
+about a drive. What stands in its place, in order: core.doctor.gate(), taken
+as a second and unrelated brake rather than because its criteria judge a drive
+-- mode 1 deliberately does not ask it, and that is a decision written up in
+CLAUDE.md; core.inventory's K14 refusal, which is flagless and answers
 whether the HOST stands on the drive; guard_nvme_free(), which answers whether
 another DOMAIN'S definition takes it -- the question guard_exclusive_devices
 cannot answer, since it only looks at running guests; a typed confirmation
@@ -2944,14 +2945,20 @@ def system_nvme_target(a, address: str):
     controller is on vfio-pci, which is the honest answer to "some other guest
     has it right now".
     """
-    # THE GATE, AND WHY MODE 2 ASKS IT WHEN MODE 1 NEVER HAS. CLAUDE.md names
-    # core.doctor.gate() as the single owner of "may a writing subcommand run
-    # on this machine", and `build` has never called it -- an omission that
-    # predates this mode and is not being fixed here for mode 1, because that
-    # would change what `build --disk` does on every unprofiled machine and
-    # that is a promise for the user to make, not this round. Mode 2 is a new
-    # path and it is the destructive one: it hands an unattended installer a
-    # physical drive. A new path does not get to inherit an old omission.
+    # THE GATE, AND WHY MODE 2 ASKS IT WHILE MODE 1 DOES NOT. This was read as
+    # an omission in mode 1 for a while; it is a decision, made 2026-08-19 and
+    # written up in CLAUDE.md. What the gate owns is "is this machine the class
+    # this tool claims, and can it hand its card over", and mode 1's answer
+    # does not depend on that: it builds an image and a CARDLESS domain, and
+    # outside the class it runs and simply has no Looking Glass -- measured in
+    # ivshmem_parts(), which says so rather than failing over. Gating it would
+    # refuse a round that works, on a machine where MUX-in-the-other-mode is
+    # reason enough to close the gate and no reason at all not to build a guest.
+    #
+    # Mode 2 asks anyway, and the reason is NOT that these criteria judge it.
+    # They say nothing about partitioning a drive -- inventory's K14 refusal is
+    # what answers that. This is a second, unrelated brake, taken deliberately
+    # because this is the one path whose damage has no undo.
     open_gate, _, _ = _core_doctor().gate(getattr(a, "profile", None))
     if not open_gate:
         die(f"Kapı kapalı -- bu makinede fiziksel bir diske kurulum yapılmaz. "

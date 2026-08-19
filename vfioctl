@@ -10,10 +10,31 @@
     ./vfioctl selftest            # five handover rounds, judged and logged
     ./vfioctl guest setup         # the guest side -- `guest --help` for its own
 
-EVERY WRITING SUBCOMMAND GOES THROUGH doctor.gate() AND NONE OF THEM DERIVES
-ITS OWN CHECK. There is one answer to "may we write on this machine" so that
-adding a subcommand cannot accidentally skip it, and there is deliberately no
-flag that turns a closed gate into an open one.
+NO SUBCOMMAND DERIVES ITS OWN VERSION OF THE GATE'S QUESTION. doctor.gate()
+owns exactly one -- is this machine the class this tool claims, and can it hand
+its card over -- so that a new subcommand cannot answer it differently, and
+there is deliberately no flag that turns a closed gate into an open one.
+
+WHICH SUBCOMMANDS REFUSE ON IT IS A SHORTER LIST THAN "the ones that write",
+and the difference is a decision rather than an omission. Four refuse: install,
+selftest and guest passthrough, whose correctness depends on the answer, plus
+build --system-nvme -- a deliberate extra brake, since these criteria say
+nothing about partitioning a drive but it is the one path whose damage has no
+undo. install --check asks and only warns, because it writes nothing.
+
+THREE CLASSES DELIBERATELY DO NOT REFUSE, and they are named here because a
+rule with unnamed exceptions goes false at the first one:
+  * the undo -- uninstall asks and says so but goes on, guest clean does not
+    ask. A machine can fall out of class after install already wrote, and
+    refusing then strands this tool's files on the one machine whose owner
+    wants them gone.
+  * what moves nothing of the host's -- build --disk builds an image and a
+    cardless domain. Outside the class it runs and simply has no Looking Glass,
+    which ivshmem_parts() says out loud rather than failing over.
+  * what already answers to a narrower and stricter owner -- both to
+    core.inventory: guest nvme --attach to its flagless K14 refusal, guest usb
+    to usb_verdict()'s REFUSE. A second, broader gate there would be a second
+    answer, and the one that drifts is the one nobody reads.
 
 NOTHING HERE TOUCHES THE CARD. install writes files; selftest starts a guest
 and reads. The card is moved by the libvirt hook, as root, under libvirtd,

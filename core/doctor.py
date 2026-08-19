@@ -460,11 +460,29 @@ def session_checks(dgpu: str | None, igpu: str | None) -> list[Check]:
 # --------------------------------------------------------------------------- #
 
 def gate(profile_name: str | None = None) -> tuple[bool, Profile | None, list[Check]]:
-    """May a writing subcommand run here? One answer, one place.
+    """Is this machine the class the tool claims, and can it hand its card
+    over? One answer, one place.
 
-    Callers in later phases (install, handover, domain definition) ask this and
-    stop on False. They do not re-derive it, and there is no flag that turns a
-    False into a True.
+    NOBODY RE-DERIVES IT AND NO FLAG TURNS False INTO True. That is what makes
+    the gate single; it is not the same as every writing subcommand asking it.
+
+    WHO REFUSES ON IT IS A NARROWER LIST THAN "THE ONES THAT WRITE", by
+    decision rather than by omission (2026-08-19). Four refuse: install,
+    selftest and guest passthrough, whose correctness depends on the answer,
+    plus build --system-nvme as a deliberate extra brake -- these criteria say
+    nothing about partitioning a drive, but it is the one path whose damage has
+    no undo. install --check asks and only warns, because it writes nothing.
+
+    THREE CLASSES DELIBERATELY DO NOT REFUSE, and they are named in CLAUDE.md
+    because a rule with unnamed exceptions goes false at the first one:
+      * the undo -- uninstall asks and says so but goes on, guest clean does
+        not ask; a refusal there strands the files on the machine whose owner
+        wants them gone.
+      * what moves nothing of the host's -- build --disk, which outside the
+        class runs and simply has no Looking Glass.
+      * what already answers to a narrower, stricter owner -- both to
+        core.inventory: guest nvme --attach to its flagless K14 refusal, guest
+        usb to usb_verdict()'s REFUSE.
     """
     from . import profile as profile_mod
 

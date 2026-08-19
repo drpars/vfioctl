@@ -3,8 +3,9 @@
 THE PROFILE IS A GATE, NOT A FINGERPRINT. Supporting a machine is a promise,
 and a promise that cannot be kept is worse than a refusal -- a half-working
 passthrough setup costs its owner a working desktop. So a profile carries the
-conditions under which the writing subcommands are allowed to run, and the
-tool refuses rather than guesses. There is deliberately no --force: the flag
+conditions under which the card may be handed over -- which is what the
+subcommands behind core.doctor.gate() are asking about -- and the tool refuses
+rather than guesses. There is deliberately no --force: the flag
 would turn "we do not support this yet" into "you were warned", which is the
 outcome the gate exists to prevent.
 

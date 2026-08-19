@@ -550,8 +550,8 @@ def uninstall(profile_name: str | None = None, kvmfr_mb: int | None = None) -> i
     something in their place does not return the machine to "before" -- it
     returns it to a machine whose passthrough setup is no longer reproducible.
 
-    WHY THE GATE IS ASKED HERE AND NOT OBEYED. Every other writing subcommand
-    stops on a closed gate; this one is the way back out. A machine can fall
+    WHY THE GATE IS ASKED HERE AND NOT OBEYED. The subcommands that ask it
+    stop on a closed gate; this one is the way back out. A machine can fall
     out of class after install already wrote -- a flipped MUX, a firmware
     setting, a kernel that stopped exporting an attribute -- and refusing then
     would strand this tool's files in /etc on the one machine whose owner wants
