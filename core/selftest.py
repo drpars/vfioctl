@@ -271,7 +271,12 @@ def rebind_wedged(dgpu: str) -> str:
             f"({' '.join(stuck)}). Misafir kapandı ve kart "
             f"'{probe.driver_of(dgpu)}' üzerinde görünüyor, ama init bitmedi; "
             f"libvirtd kendi hook'unda bloke olduğu için virsh de cevap "
-            f"vermiyor. Yığın: journalctl -k -b -g rmapiLockAcquire")
+            # NOT `-k -b`: that form implies the CURRENT boot, and the line
+            # right above says recovery is a reboot -- so the reader runs the
+            # hint after the reboot and gets `-- No entries --`, which reads as
+            # "there is no evidence" for a question that has 40 lines of it.
+            f"vermiyor. Yığın: journalctl _TRANSPORT=kernel -g "
+            f"'{DEADLOCK_SIGNATURE.pattern}'")
 
 
 def own_card_holders() -> list[str]:
@@ -294,10 +299,34 @@ def own_card_holders() -> list[str]:
 # appears even on the runs where a later lsmod comes back clean -- because the
 # kernel got there by killing the holder. The rest catch the failure this test
 # exists for: the greeter's X server aborting and taking the session with it.
+#
+# THE LAST THREE ALTERNATES ARE THE DEAD LOCK, missing until 2026-08-21.
+# Measured against the recorded 2026-08-18 window: of its 1505 lines this
+# pattern caught 68 and not one of them was the failure. The round read its own
+# journal every time and stayed blind to the only class whose recovery is a
+# reboot.
 JOURNAL_SIGNALS = re.compile(
-    r"NVRM|non-zero usage count|vfio|Xorg|caught signal|SIGABRT|libvirt",
+    r"NVRM|non-zero usage count|vfio|Xorg|caught signal|SIGABRT|libvirt"
+    r"|rw-semaphore|rmapiLockAcquire|kgspInitRm",
     re.IGNORECASE,
 )
+
+# WHY A SECOND, NARROWER PATTERN: the one above selects what is worth reading,
+# and most of what it selects is normal -- 68 lines in that same window. This
+# one decides a verdict, so it may hold only strings measured to appear when
+# the GSP init race actually fired. Across all 93 boots of this journal, every
+# transport, it matches 40 lines in exactly the two known events and nowhere
+# else. What did not qualify, and why:
+#   - `INFO: task`, `blocked for more than`, `hung_task` each fire on a third
+#     boot too, an exfat unmount blocked on writeback (2026-08-21) with no
+#     nvidia frame in its stack. Generic hung-task wording cannot name a
+#     subsystem.
+#   - `rmapiLockIsOwner` appears ONCE in the whole journal and only in the
+#     08-12 event; the 08-18 one -- the round this tool actually lost -- never
+#     printed it. Keying on the assertion would have missed the failure it
+#     exists for.
+# Case-sensitive on purpose: these are the kernel's own spellings.
+DEADLOCK_SIGNATURE = re.compile(r"rw-semaphore|rmapiLockAcquire|kgspInitRm")
 
 
 def journal_since(since: str) -> list[str]:
@@ -657,6 +686,27 @@ def one_round(target: Target, number: int, comp_before: str | None) -> str:
         print(f"   {line}")
     if not signals:
         print("   (hiçbiri = temiz)")
+
+    # A ROUND THAT PRINTED THIS IS NOT A CLEAN ROUND, even when every other
+    # check passed. `rebind_wedged` can only speak while a task is still in D,
+    # and that is one sample taken as the round ends; the kernel's own report
+    # arrives after 122 seconds of blockage and lands here instead. So this is
+    # the wider net in time, and the case it exists for is the round that
+    # finished looking clean -- which nothing recorded until now. That gap is
+    # the whole problem: two events in 75 re-inits means a clean series is
+    # almost no evidence, so a round that came close has to leave a mark.
+    #
+    # `if not verdict` on purpose: when the machine really is wedged the
+    # verdict above already names the cause, and this must not overwrite it.
+    wedge = [line for line in signals if DEADLOCK_SIGNATURE.search(line)]
+    if wedge:
+        print(f"\n   !! ÖLÜ KİLİT İMZASI — {len(wedge)} satır. Bu tur temiz "
+              f"sayılmaz.")
+        print(f"   !! Tüm geçmiş (boot'tan bağımsız): journalctl "
+              f"_TRANSPORT=kernel -g '{DEADLOCK_SIGNATURE.pattern}'")
+        if not verdict:
+            verdict = (f"journal: ölü kilit imzası basıldı ({len(wedge)} "
+                       f"satır) — devir tamamlandı ama tur temiz sayılmaz")
     return verdict
 
 
